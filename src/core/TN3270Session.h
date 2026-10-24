@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include "TLSTransport.h"
@@ -131,7 +132,7 @@ private:
     static std::vector<uint8_t> escapeRecord(const std::vector<uint8_t>& raw);
 
     TLSTransport       transport_;
-    State              state_       { State::Disconnected };
+    std::atomic<State> state_       { State::Disconnected };  // written by the network thread, read by the UI
     TelnetState        telnetState_ { TelnetState::Normal };
     TerminalModel      model_       { TerminalModel::Model2 };
 

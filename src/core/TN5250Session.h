@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <functional>
 
 namespace x3270 {
@@ -104,7 +105,7 @@ private:
     };
 
     TLSTransport       transport_;
-    State              state_       { State::Disconnected };
+    std::atomic<State> state_       { State::Disconnected };  // written by the network thread, read by the UI
     TelnetState        telnetState_ { TelnetState::Normal };
     TerminalModel      model_       { TerminalModel::Model2 };
 

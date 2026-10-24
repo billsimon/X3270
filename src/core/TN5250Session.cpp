@@ -112,6 +112,9 @@ void TN5250Session::readLoop() {
         }
     }
     state_ = State::Disconnected;
+    // The reader owns the transport's resources; free them only now that no
+    // recv() is in flight (disconnect() from the UI thread just wakes us).
+    transport_.close();
     if (errorCb_) errorCb_("Connection closed");
 }
 

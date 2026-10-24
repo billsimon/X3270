@@ -167,24 +167,24 @@
                       record.size(), b0, b1, b2, b3, b4, b5);
             }
 
-            // Per the reference (session.c tn5250_session_handle_receive):
-            // PUT_GET (0x03) and INVITE (0x01) opcodes immediately unlock the keyboard
-            // (set invited=1 and clear X_CLOCK indicator) BEFORE processing stream content.
-            if (record.size() >= 10) {
-                uint8_t opcode = record[9];
-                if (opcode == 0x01 || opcode == 0x03) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        __strong auto s2 = weakSelf;
-                        if (s2) s2->_kbd5250->unlock();
-                    });
-                }
-            }
-
-            s->_parser5250->processRecord(record);
-            NSLog(@"[5250] after processRecord: bufPtr=%d", s->_screen->bufferPointer());
+            // The screen buffer and keyboard state are main-thread only (drawRect:
+            // and key handling use them), so parse there too.
+            auto copy = std::make_shared<std::vector<uint8_t>>(record);
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong auto s2 = weakSelf;
-                if (s2) [s2->_termView screenDidUpdate];
+                if (!s2 || s2->_userClosed) return;
+
+                // Per the reference (session.c tn5250_session_handle_receive):
+                // PUT_GET (0x03) and INVITE (0x01) opcodes immediately unlock the keyboard
+                // (set invited=1 and clear X_CLOCK indicator) BEFORE processing stream content.
+                if (copy->size() >= 10) {
+                    uint8_t opcode = (*copy)[9];
+                    if (opcode == 0x01 || opcode == 0x03) s2->_kbd5250->unlock();
+                }
+
+                s2->_parser5250->processRecord(*copy);
+                NSLog(@"[5250] after processRecord: bufPtr=%d", s2->_screen->bufferPointer());
+                [s2->_termView screenDidUpdate];
             });
         });
 
@@ -227,19 +227,23 @@
         _session->setDataCallback([weakSelf](const std::vector<uint8_t>& record) {
             __strong auto s = weakSelf;
             if (!s) return;
-            // TN3270E mode: strip 5-byte header and ignore non-3270-data records
+            // TN3270E mode: strip 5-byte header and ignore non-3270-data records.
+            // (Done here: TN3270E negotiation state belongs to the network thread.)
             auto* s3270 = static_cast<x3270::TN3270Session*>(s->_session.get());
-            const std::vector<uint8_t>* payload = &record;
-            std::vector<uint8_t> stripped;
+            auto payload = std::make_shared<std::vector<uint8_t>>();
             if (s3270->tn3270eActive() && record.size() >= 5) {
                 if (record[0] != 0x00) return;
-                stripped.assign(record.begin() + 5, record.end());
-                payload = &stripped;
+                payload->assign(record.begin() + 5, record.end());
+            } else {
+                *payload = record;
             }
-            s->_parser3270->processRecord(*payload);
+            // The screen buffer and keyboard state are main-thread only (drawRect:
+            // and key handling use them), so parse there too.
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong auto s2 = weakSelf;
-                if (s2) [s2->_termView screenDidUpdate];
+                if (!s2 || s2->_userClosed) return;
+                s2->_parser3270->processRecord(*payload);
+                [s2->_termView screenDidUpdate];
             });
         });
     }
