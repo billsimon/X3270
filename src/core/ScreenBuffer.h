@@ -19,6 +19,15 @@ static constexpr uint8_t FA_INTENSIFIED = 0x08;  // bits[3:2]=10 → intensified
 static constexpr uint8_t FA_NONDISPLAY  = 0x0C;  // bits[3:2]=11 → non-display (hidden)
 static constexpr uint8_t FA_MDT        = 0x01;
 
+// Byte that stands in for hidden-field data in the copies of outbound records
+// written to the traffic log (EBCDIC '*', the same in every supported code page).
+static constexpr uint8_t LOG_MASK_CHAR = 0x5C;
+
+/// 5250 display attributes 0x27/0x2F/0x37/0x3F are non-display.
+inline bool isNonDisplay5250(uint8_t displayAttr) {
+    return displayAttr >= 0x20 && displayAttr <= 0x3F && (displayAttr & 0x07) == 0x07;
+}
+
 // ── Cell ─────────────────────────────────────────────────────────────────────
 struct Cell {
     uint8_t  ch        { 0x00 }; // EBCDIC character byte (0x00 = empty/null)
@@ -135,11 +144,16 @@ public:
 
     /// Build Read Modified data: SBA(cursor) + {SBA(field)+data} for each MDT field.
     /// Pass includeProtected=true only for Read Modified All.
-    std::vector<uint8_t> buildReadModifiedRecord(int aidByte, bool includeProtected = false) const;
+    /// If logCopy is given it receives the same record with the data of
+    /// non-display (password) fields replaced by LOG_MASK_CHAR, for logging.
+    std::vector<uint8_t> buildReadModifiedRecord(int aidByte, bool includeProtected = false,
+                                                 std::vector<uint8_t>* logCopy = nullptr) const;
 
     /// Build a Read Buffer reply: AID + cursor + every buffer position in
     /// order, with each field attribute sent as SF + attribute byte.
-    std::vector<uint8_t> buildReadBufferRecord(int aidByte) const;
+    /// logCopy: as for buildReadModifiedRecord.
+    std::vector<uint8_t> buildReadBufferRecord(int aidByte,
+                                               std::vector<uint8_t>* logCopy = nullptr) const;
 
     /// Clear MDT bit on all unprotected fields
     void resetAllMDT();

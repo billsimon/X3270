@@ -43,22 +43,25 @@ void TN3270Session::disconnect() {
     transport_.disconnect();
 }
 
-bool TN3270Session::send3270Record(const std::vector<uint8_t>& record) {
+bool TN3270Session::send3270Record(const std::vector<uint8_t>& record,
+                                   const std::vector<uint8_t>* logCopy) {
     if (state_ != State::Connected) return false;
 
-    std::vector<uint8_t> payload;
-    if (tn3270eMode_) {
-        // TN3270E: prepend 5-byte header [data-type, request, response, seq_hi, seq_lo]
-        uint16_t seq = sendSeqNum_++;
-        payload = { DT_3270_DATA, 0x00, 0x00,
-                    static_cast<uint8_t>(seq >> 8),
-                    static_cast<uint8_t>(seq & 0xFF) };
-        payload.insert(payload.end(), record.begin(), record.end());
-    } else {
-        payload = record;
-    }
-    auto escaped = escapeRecord(payload);
-    if (trafficCb_) trafficCb_(true, escaped);
+    const bool tn3270e = tn3270eMode_;
+    const uint16_t seq = tn3270e ? sendSeqNum_++ : 0;
+    auto frame = [&](const std::vector<uint8_t>& rec) {
+        std::vector<uint8_t> payload;
+        if (tn3270e) {
+            // TN3270E: prepend 5-byte header [data-type, request, response, seq_hi, seq_lo]
+            payload = { DT_3270_DATA, 0x00, 0x00,
+                        static_cast<uint8_t>(seq >> 8),
+                        static_cast<uint8_t>(seq & 0xFF) };
+        }
+        payload.insert(payload.end(), rec.begin(), rec.end());
+        return escapeRecord(payload);
+    };
+    auto escaped = frame(record);
+    if (trafficCb_) trafficCb_(true, logCopy ? frame(*logCopy) : escaped);
     return transport_.send(escaped);
 }
 

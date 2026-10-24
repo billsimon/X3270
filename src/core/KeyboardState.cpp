@@ -120,14 +120,15 @@ bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
 
 // ── AID transmission ──────────────────────────────────────────────────────────
 void KeyboardState::sendAID(uint8_t aidCode, bool includeModifiedFields) {
-    std::vector<uint8_t> record;
+    std::vector<uint8_t> record, logCopy;
     if (includeModifiedFields) {
-        record = screen_.buildReadModifiedRecord(aidCode);
+        record = screen_.buildReadModifiedRecord(aidCode, false, &logCopy);
     } else {
         // PA keys and CLEAR are a "short read": the AID byte alone.
         record.push_back(aidCode);
+        logCopy = record;
     }
-    if (sendCb_ && sendCb_(record)) lock(LockReason::System);
+    if (sendCb_ && sendCb_(record, logCopy)) lock(LockReason::System);
 }
 
 void KeyboardState::sendPAKey(uint8_t aidCode) {

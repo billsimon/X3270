@@ -50,7 +50,9 @@ class DataStreamParser {
 public:
     using AlarmCallback          = std::function<void()>;
     using UnlockCallback        = std::function<void()>;
-    using SendCallback          = std::function<void(const std::vector<uint8_t>&)>;
+    /// data goes to the host; logCopy has password field data masked (traffic log).
+    using SendCallback          = std::function<void(const std::vector<uint8_t>& data,
+                                                     const std::vector<uint8_t>& logCopy)>;
     using GraphicsUpdateCallback= std::function<void()>;
 
     DataStreamParser(ScreenBuffer& screen, EbcdicCodec& codec);

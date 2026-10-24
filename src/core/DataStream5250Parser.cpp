@@ -401,7 +401,7 @@ void DataStream5250Parser::handleCommand(uint8_t cmd) {
         break;
 
     case CMD5250_READ_SCREEN:
-        if (gdsSendCb_) gdsSendCb_(buildReadScreenData(), recordOpcode_);
+        if (gdsSendCb_) { std::vector<uint8_t> log; auto d = buildReadScreenData(&log); gdsSendCb_(d, recordOpcode_, log); }
         state_ = ParseState::Command;
         break;
 
@@ -415,7 +415,7 @@ void DataStream5250Parser::handleCommand(uint8_t cmd) {
 
     case CMD5250_SAVE_SCREEN:    // 0x02
         // Reply with the opcode the host used for the request.
-        if (gdsSendCb_) gdsSendCb_(buildSaveScreenData(), recordOpcode_);
+        if (gdsSendCb_) { std::vector<uint8_t> log; auto d = buildSaveScreenData(&log); gdsSendCb_(d, recordOpcode_, log); }
         state_ = ParseState::Command;
         break;
 
@@ -547,9 +547,11 @@ int DataStream5250Parser::rowColToOffset(uint8_t row, uint8_t col) const {
 }
 
 // ── Save Screen / Read Screen ─────────────────────────────────────────────────
-std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData() const {
+std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData(std::vector<uint8_t>* logCopy) const {
     const int sz = screen_.size(), cols = screen_.cols();
     std::vector<uint8_t> d;
+    std::vector<size_t> hiddenAt;                    // indices of hidden characters in d
+    bool hidden = false;                             // governed by a non-display attribute
     auto sba = [&](int pos) {
         d.push_back(ORD5250_SBA);
         d.push_back(static_cast<uint8_t>(pos / cols + 1));
@@ -565,6 +567,7 @@ std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData() const {
         uint8_t out;
         if (c.isFA) {
             uint8_t disp = (c.fgColor >= 0x20 && c.fgColor <= 0x3F) ? c.fgColor : 0x20;
+            hidden = isNonDisplay5250(disp);
             if (pos != next) sba(pos);
             if (c.fieldLen > 0) {                    // Start of Field
                 d.push_back(ORD5250_SF);
@@ -581,6 +584,7 @@ std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData() const {
         out = c.ch;
         if (out < 0x40) continue;                    // nulls: skipped via SBA
         if (pos != next) sba(pos);
+        if (hidden) hiddenAt.push_back(d.size());
         d.push_back(out);
         next = pos + 1;
     }
@@ -588,16 +592,29 @@ std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData() const {
     d.push_back(ORD5250_IC);
     d.push_back(static_cast<uint8_t>(cur / cols + 1));
     d.push_back(static_cast<uint8_t>(cur % cols + 1));
+    if (logCopy) {
+        *logCopy = d;
+        for (size_t i : hiddenAt) (*logCopy)[i] = LOG_MASK_CHAR;
+    }
     return d;
 }
 
-std::vector<uint8_t> DataStream5250Parser::buildReadScreenData() const {
+std::vector<uint8_t> DataStream5250Parser::buildReadScreenData(std::vector<uint8_t>* logCopy) const {
     std::vector<uint8_t> d;
     d.reserve(screen_.size());
+    if (logCopy) { logCopy->clear(); logCopy->reserve(screen_.size()); }
+    bool hidden = false;
     for (int pos = 0; pos < screen_.size(); ++pos) {
         const Cell& c = screen_.at(pos);
-        if (c.isFA) d.push_back((c.fgColor >= 0x20 && c.fgColor <= 0x3F) ? c.fgColor : 0x20);
-        else        d.push_back(c.ch);
+        if (c.isFA) {
+            uint8_t disp = (c.fgColor >= 0x20 && c.fgColor <= 0x3F) ? c.fgColor : 0x20;
+            hidden = isNonDisplay5250(disp);
+            d.push_back(disp);
+            if (logCopy) logCopy->push_back(disp);
+        } else {
+            d.push_back(c.ch);
+            if (logCopy) logCopy->push_back(hidden && c.ch ? LOG_MASK_CHAR : c.ch);
+        }
     }
     return d;
 }

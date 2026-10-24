@@ -34,7 +34,10 @@ public:
     /// Send a raw application-layer record.
     /// For TN3270: raw 3270 bytes (Telnet escaping and EOR are handled internally).
     /// For TN5250: raw 5250 input record bytes (GDS header added internally).
-    virtual bool sendRecord(const std::vector<uint8_t>& record) = 0;
+    /// logCopy, if given, is what the traffic callback reports instead of
+    /// `record` — the same bytes with password field data masked.
+    virtual bool sendRecord(const std::vector<uint8_t>& record,
+                            const std::vector<uint8_t>* logCopy = nullptr) = 0;
 
     /// Block reading from the socket, delivering records via DataCallback.
     /// Returns when the connection is closed.  Call from a dedicated thread.

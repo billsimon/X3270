@@ -257,7 +257,8 @@ std::vector<ScreenBuffer::ModifiedField> ScreenBuffer::getModifiedFields(bool in
     return result;
 }
 
-std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool includeProtected) const {
+std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool includeProtected,
+                                                           std::vector<uint8_t>* logCopy) const {
     std::vector<uint8_t> rec;
     // AID byte
     rec.push_back(static_cast<uint8_t>(aidByte));
@@ -269,30 +270,40 @@ std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool inc
 
     // Unformatted screen (no field attributes at all, e.g. CICS after CLEAR or
     // TSO line mode): send every non-null character in buffer order, no SBAs.
+    // (No fields means nothing is hidden.)
     if (findFieldStart(0) < 0) {
         for (const auto& c : cells_) {
             if (c.ch != 0x00) rec.push_back(c.ch);
         }
+        if (logCopy) *logCopy = rec;
         return rec;
     }
 
     // Each modified field: SBA(addr) + data
     auto fields = getModifiedFields(includeProtected);
+    if (logCopy) *logCopy = rec;
     // SBA order code
     static constexpr uint8_t SBA_ORDER = 0x11;
     for (const auto& mf : fields) {
         uint8_t addr[2];
         // Data starts at FA+1
         encodeAddress(clamp(mf.startPos + 1), addr);
-        rec.push_back(SBA_ORDER);
-        rec.push_back(addr[0]);
-        rec.push_back(addr[1]);
-        for (uint8_t b : mf.data) rec.push_back(b);
+        const bool hidden = (mf.attrByte & 0x0C) == FA_NONDISPLAY;
+        for (auto* out : { &rec, logCopy }) {
+            if (!out) continue;
+            out->push_back(SBA_ORDER);
+            out->push_back(addr[0]);
+            out->push_back(addr[1]);
+        }
+        for (uint8_t b : mf.data) {
+            rec.push_back(b);
+            if (logCopy) logCopy->push_back(hidden ? LOG_MASK_CHAR : b);
+        }
     }
     return rec;
 }
 
-std::vector<uint8_t> ScreenBuffer::buildReadBufferRecord(int aidByte) const {
+std::vector<uint8_t> ScreenBuffer::buildReadBufferRecord(int aidByte, std::vector<uint8_t>* logCopy) const {
     std::vector<uint8_t> rec;
     rec.reserve(3 + cells_.size() * 2);
     rec.push_back(static_cast<uint8_t>(aidByte));
@@ -300,12 +311,18 @@ std::vector<uint8_t> ScreenBuffer::buildReadBufferRecord(int aidByte) const {
     encodeAddress(cursorPos_, cursorAddr);
     rec.push_back(cursorAddr[0]);
     rec.push_back(cursorAddr[1]);
+    if (logCopy) *logCopy = rec;
+    int  fa     = findFieldStart(0);
+    bool hidden = fa >= 0 && cells_[fa].isNonDisplay();
     for (const auto& c : cells_) {
         if (c.isFA) {
+            hidden = c.isNonDisplay();
             rec.push_back(0x1D);                      // SF order
             rec.push_back(kCodeTable[c.attr & 0x3F]); // attribute in graphic form
+            if (logCopy) { logCopy->push_back(rec[rec.size() - 2]); logCopy->push_back(rec.back()); }
         } else {
             rec.push_back(c.ch);
+            if (logCopy) logCopy->push_back(hidden && c.ch ? LOG_MASK_CHAR : c.ch);
         }
     }
     return rec;

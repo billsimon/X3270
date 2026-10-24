@@ -178,15 +178,16 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
         break;
     case CMD_READ_BUFFER:
     case CMD_READ_BUFFER_SNA:
-        if (sendCb_) sendCb_(screen_.buildReadBufferRecord(0x60 /*no-AID*/));
+        if (sendCb_) { std::vector<uint8_t> log; auto rec = screen_.buildReadBufferRecord(0x60 /*no-AID*/, &log); sendCb_(rec, log); }
         state_ = ParseState::SkipRecord;
         break;
     case CMD_READ_MODIFIED:
     case CMD_READ_MODIFIED_SNA:
         // Host-solicited Read Modified: unprotected MDT fields only.
         if (sendCb_) {
-            auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/);
-            sendCb_(data);
+            std::vector<uint8_t> log;
+            auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/, false, &log);
+            sendCb_(data, log);
         }
         state_ = ParseState::SkipRecord;
         break;
@@ -194,8 +195,9 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
     case CMD_READ_MODIFIED_ALL_SNA:
         // Host-solicited Read Modified All: ALL MDT fields including protected.
         if (sendCb_) {
-            auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/, true);
-            sendCb_(data);
+            std::vector<uint8_t> log;
+            auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/, true, &log);
+            sendCb_(data, log);
         }
         state_ = ParseState::SkipRecord;
         break;
@@ -359,23 +361,25 @@ void DataStreamParser::handleWSF(const std::vector<uint8_t>& record) {
             // ── Read Partition ────────────────────────────────────────────────
             if (sfLen >= 5 && sendCb_) {
                 uint8_t readType = record[i + 4]; // [partition_id][type]
+                std::vector<uint8_t> rec, log;
                 switch (readType) {
                 case 0x02: // Query
                 case 0x03: // Query List (we always reply with everything)
-                    sendCb_(buildQueryReply());
+                    rec = log = buildQueryReply();
                     break;
                 case 0xF1: // Read Buffer
-                    sendCb_(screen_.buildReadBufferRecord(0x60));
+                    rec = screen_.buildReadBufferRecord(0x60, &log);
                     break;
                 case 0xF6: // Read Modified
-                    sendCb_(screen_.buildReadModifiedRecord(0x60));
+                    rec = screen_.buildReadModifiedRecord(0x60, false, &log);
                     break;
                 case 0x6E: // Read Modified All
-                    sendCb_(screen_.buildReadModifiedRecord(0x60, true));
+                    rec = screen_.buildReadModifiedRecord(0x60, true, &log);
                     break;
                 default:
                     break;
                 }
+                if (!rec.empty()) sendCb_(rec, log);
             }
             break;
 

@@ -63,7 +63,9 @@ public:
     using AlarmCallback  = std::function<void()>;
     using UnlockCallback = std::function<void()>;
     using SendCallback   = std::function<void(const std::vector<uint8_t>&)>;
-    using GdsSendCallback= std::function<void(const std::vector<uint8_t>&, uint8_t opcode)>;
+    /// payload goes to the host; logCopy has password field data masked (traffic log).
+    using GdsSendCallback= std::function<void(const std::vector<uint8_t>& payload, uint8_t opcode,
+                                              const std::vector<uint8_t>& logCopy)>;
 
     DataStream5250Parser(ScreenBuffer& screen);
 
@@ -155,9 +157,9 @@ private:
 
     /// Save Screen reply: a data stream that redraws the current screen when
     /// the host hands it back with Restore Screen (the host treats it as opaque).
-    std::vector<uint8_t> buildSaveScreenData() const;
+    std::vector<uint8_t> buildSaveScreenData(std::vector<uint8_t>* logCopy = nullptr) const;
     /// Read Screen reply: every buffer position, attributes as their 0x20-0x3F bytes.
-    std::vector<uint8_t> buildReadScreenData() const;
+    std::vector<uint8_t> buildReadScreenData(std::vector<uint8_t>* logCopy = nullptr) const;
     void handleDataByte(uint8_t b);
 
     /// Build the 61-byte query reply payload (per IBM 5250 Functions Reference, §15.27.2).

@@ -93,11 +93,14 @@ public:
     bool isConnected() const override { return state_ == State::Connected; }
 
     /// Send a raw 5250 input record (GDS header is added here; uses PUT_GET opcode).
-    bool sendRecord(const std::vector<uint8_t>& record) override;
+    bool sendRecord(const std::vector<uint8_t>& record,
+                    const std::vector<uint8_t>* logCopy = nullptr) override;
 
     /// Send a raw 5250 record with an explicit GDS opcode and header flags
     /// (GDS_FLAG_ATN / GDS_FLAG_SRQ for the Attention and SysReq keys).
-    bool sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags = 0x00);
+    /// The traffic callback sees logCopy (masked) instead of payload, if given.
+    bool sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags = 0x00,
+                       const std::vector<uint8_t>* logCopy = nullptr);
 
     /// Send Telnet IAC IP (Attention / system request).
     bool sendATTN();
@@ -157,6 +160,8 @@ private:
     void sendRaw(const std::vector<uint8_t>& data);
 
     std::vector<uint8_t> escapeRecord(const std::vector<uint8_t>& raw);
+    /// Wrap payload in the 10-byte GDS header.
+    static std::vector<uint8_t> gdsFrame(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags);
 
     /// IBM terminal-type string for TN5250 negotiation.
     const char* terminalTypeName() const;

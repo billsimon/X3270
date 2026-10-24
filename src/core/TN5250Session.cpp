@@ -59,14 +59,22 @@ void TN5250Session::disconnect() {
 }
 
 // ── Send path ─────────────────────────────────────────────────────────────────
-bool TN5250Session::sendRecord(const std::vector<uint8_t>& record) {
+bool TN5250Session::sendRecord(const std::vector<uint8_t>& record,
+                               const std::vector<uint8_t>* logCopy) {
     if (state_ != State::Connected) return false;
-    return sendGdsRecord(record, GDS_OP_PUT_GET);
+    return sendGdsRecord(record, GDS_OP_PUT_GET, 0x00, logCopy);
 }
 
-bool TN5250Session::sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags) {
+bool TN5250Session::sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags,
+                                  const std::vector<uint8_t>* logCopy) {
     if (state_ != State::Connected) return false;
+    auto escaped = escapeRecord(gdsFrame(payload, opcode, flags));
+    if (trafficCb_) trafficCb_(true, logCopy ? escapeRecord(gdsFrame(*logCopy, opcode, flags)) : escaped);
+    return transport_.send(escaped);
+}
 
+std::vector<uint8_t> TN5250Session::gdsFrame(const std::vector<uint8_t>& payload,
+                                             uint8_t opcode, uint8_t flags) {
     // Build GDS wrapper — 10-byte header per tn5250 reference (telnetstr.c / record.h):
     //   [0-1] total length (big-endian)
     //   [2]   0x12  GDS record type
@@ -90,10 +98,7 @@ bool TN5250Session::sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t o
     gds.push_back(0x00); // reserved
     gds.push_back(opcode); // GDS opcode
     gds.insert(gds.end(), payload.begin(), payload.end());
-
-    auto escaped = escapeRecord(gds);
-    if (trafficCb_) trafficCb_(true, escaped);
-    return transport_.send(escaped);
+    return gds;
 }
 
 bool TN5250Session::sendATTN() {

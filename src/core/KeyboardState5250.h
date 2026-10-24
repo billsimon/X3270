@@ -65,7 +65,9 @@ public:
         OErr,     ///< Typing error (protected/full field)
     };
 
-    using SendRecordCallback = std::function<bool(const std::vector<uint8_t>&)>;
+    /// record goes to the host; logCopy has password field data masked (traffic log).
+    using SendRecordCallback = std::function<bool(const std::vector<uint8_t>& record,
+                                                  const std::vector<uint8_t>& logCopy)>;
     /// Sends an empty record whose GDS header carries `flags` (ATN / SRQ).
     using SignalCallback     = std::function<bool(uint8_t headerFlags)>;
 
@@ -120,7 +122,8 @@ private:
     int  inputFieldAt(int pos) const;
     /// One past the last character position of the field whose FA is at `fa`.
     int  fieldEnd(int fa) const;
-    std::vector<uint8_t> buildInputRecord(uint8_t aidCode, bool includeModifiedFields) const;
+    std::vector<uint8_t> buildInputRecord(uint8_t aidCode, bool includeModifiedFields,
+                                          std::vector<uint8_t>* logCopy = nullptr) const;
 
     uint8_t currentFieldAttr() const;
     bool    isCurrentFieldEditable() const;

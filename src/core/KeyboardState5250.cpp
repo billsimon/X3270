@@ -187,18 +187,22 @@ bool KeyboardState5250::insertCharAtCursor(uint8_t ebcdic) {
 
 void KeyboardState5250::sendAID(uint8_t aidCode, bool includeModifiedFields) {
     ferPos_ = -1;
-    auto record = buildInputRecord(aidCode, includeModifiedFields);
-    if (sendCb_ && sendCb_(record)) {
+    std::vector<uint8_t> logCopy;
+    auto record = buildInputRecord(aidCode, includeModifiedFields, &logCopy);
+    if (sendCb_ && sendCb_(record, logCopy)) {
         lock(LockReason::System);
     }
 }
 
 void KeyboardState5250::sendReadImmediate() {
     // Read Immediate answers with AID 0x00 and leaves the keyboard alone.
-    if (sendCb_) sendCb_(buildInputRecord(0x00, true));
+    std::vector<uint8_t> logCopy;
+    auto record = buildInputRecord(0x00, true, &logCopy);
+    if (sendCb_) sendCb_(record, logCopy);
 }
 
-std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool includeModifiedFields) const {
+std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool includeModifiedFields,
+                                                         std::vector<uint8_t>* logCopy) const {
     uint8_t curRow, curCol;
     encodeCursor(curRow, curCol);
 
@@ -215,7 +219,9 @@ std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool i
         // 5250 SBA inside input records: 0x11 [row] [col]
         int inField       = 0; // 0=no field, 1=unprotected modified
         int fieldStart    = -1;
+        bool hidden       = false; // field has a non-display attribute
         std::vector<uint8_t> fieldData;
+        std::vector<std::pair<size_t, size_t>> hiddenRanges; // [begin, end) in record
 
         auto flushField = [&](int faPos) {
             if (inField == 1 && !fieldData.empty()) {
@@ -229,6 +235,7 @@ std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool i
                 // Trim trailing nulls
                 while (!fieldData.empty() && fieldData.back() == 0x00)
                     fieldData.pop_back();
+                if (hidden) hiddenRanges.push_back({record.size(), record.size() + fieldData.size()});
                 record.insert(record.end(), fieldData.begin(), fieldData.end());
                 fieldData.clear();
             }
@@ -246,6 +253,7 @@ std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool i
                     inField    = 1;
                     fieldStart = i;
                     fieldLeft  = c.fieldLen > 0 ? c.fieldLen : screen_.size();
+                    hidden     = isNonDisplay5250(c.fgColor);
                 } else {
                     inField    = 0;
                     fieldStart = -1;
@@ -257,6 +265,14 @@ std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool i
         }
         // Flush last field
         flushField(screen_.size() - 1);
+
+        if (logCopy) {
+            *logCopy = record;
+            for (auto [b, e] : hiddenRanges)
+                std::fill(logCopy->begin() + b, logCopy->begin() + e, LOG_MASK_CHAR);
+        }
+    } else if (logCopy) {
+        *logCopy = record;
     }
     return record;
 }

@@ -41,7 +41,10 @@ public:
         OErr,        // Operator error (typing in protected/numeric/full field)
     };
 
-    using SendRecordCallback = std::function<bool(const std::vector<uint8_t>&)>;
+    /// record goes to the host; logCopy is the same record with password
+    /// (non-display) field data masked, for the traffic log.
+    using SendRecordCallback = std::function<bool(const std::vector<uint8_t>& record,
+                                                  const std::vector<uint8_t>& logCopy)>;
 
     KeyboardState(ScreenBuffer& screen, EbcdicCodec& codec);
 

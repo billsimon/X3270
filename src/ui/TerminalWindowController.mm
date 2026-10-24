@@ -147,9 +147,10 @@
         });
 
         // Save Screen / Read Screen replies carry the request's GDS opcode
-        _parser5250->setGdsSendCallback([weakSelf, session5250](const std::vector<uint8_t>& payload, uint8_t opcode) {
+        _parser5250->setGdsSendCallback([weakSelf, session5250](const std::vector<uint8_t>& payload, uint8_t opcode,
+                                                                const std::vector<uint8_t>& logCopy) {
             __strong auto s = weakSelf;
-            if (s) session5250->sendGdsRecord(payload, opcode);
+            if (s) session5250->sendGdsRecord(payload, opcode, 0x00, &logCopy);
         });
         // The parser runs on the main thread, so these can act directly.
         _parser5250->setErrorCodeCallback([weakSelf]() {
@@ -161,9 +162,10 @@
             if (s) s->_kbd5250->sendReadImmediate();
         });
 
-        _kbd5250->setSendCallback([weakSelf](const std::vector<uint8_t>& record) -> bool {
+        _kbd5250->setSendCallback([weakSelf](const std::vector<uint8_t>& record,
+                                             const std::vector<uint8_t>& logCopy) -> bool {
             __strong auto s = weakSelf;
-            return s ? s->_session->sendRecord(record) : false;
+            return s ? s->_session->sendRecord(record, &logCopy) : false;
         });
         // Attention / SysReq: empty record with the flag in the GDS header
         _kbd5250->setSignalCallback([weakSelf, session5250](uint8_t flags) -> bool {
@@ -234,14 +236,18 @@
         _parser3270->setAlarmCallback([]() {
             dispatch_async(dispatch_get_main_queue(), ^{ NSBeep(); });
         });
-        _parser3270->setSendCallback([weakSelf](const std::vector<uint8_t>& data) {
+        // Outbound records come with a copy whose password-field data is
+        // masked; the session logs that copy to the traffic monitor.
+        _parser3270->setSendCallback([weakSelf](const std::vector<uint8_t>& data,
+                                                const std::vector<uint8_t>& logCopy) {
             __strong auto s = weakSelf;
-            if (s) s->_session->sendRecord(data);
+            if (s) s->_session->sendRecord(data, &logCopy);
         });
 
-        _kbd3270->setSendCallback([weakSelf](const std::vector<uint8_t>& record) -> bool {
+        _kbd3270->setSendCallback([weakSelf](const std::vector<uint8_t>& record,
+                                             const std::vector<uint8_t>& logCopy) -> bool {
             __strong auto s = weakSelf;
-            return s ? s->_session->sendRecord(record) : false;
+            return s ? s->_session->sendRecord(record, &logCopy) : false;
         });
 
         _session->setDataCallback([weakSelf](const std::vector<uint8_t>& record) {
