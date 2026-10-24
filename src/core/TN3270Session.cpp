@@ -43,22 +43,25 @@ void TN3270Session::disconnect() {
     transport_.disconnect();
 }
 
-bool TN3270Session::send3270Record(const std::vector<uint8_t>& record) {
+bool TN3270Session::send3270Record(const std::vector<uint8_t>& record,
+                                   const std::vector<uint8_t>* logCopy) {
     if (state_ != State::Connected) return false;
 
-    std::vector<uint8_t> payload;
-    if (tn3270eMode_) {
-        // TN3270E: prepend 5-byte header [data-type, request, response, seq_hi, seq_lo]
-        uint16_t seq = sendSeqNum_++;
-        payload = { DT_3270_DATA, 0x00, 0x00,
-                    static_cast<uint8_t>(seq >> 8),
-                    static_cast<uint8_t>(seq & 0xFF) };
-        payload.insert(payload.end(), record.begin(), record.end());
-    } else {
-        payload = record;
-    }
-    auto escaped = escapeRecord(payload);
-    if (trafficCb_) trafficCb_(true, escaped);
+    const bool tn3270e = tn3270eMode_;
+    const uint16_t seq = tn3270e ? sendSeqNum_++ : 0;
+    auto frame = [&](const std::vector<uint8_t>& rec) {
+        std::vector<uint8_t> payload;
+        if (tn3270e) {
+            // TN3270E: prepend 5-byte header [data-type, request, response, seq_hi, seq_lo]
+            payload = { DT_3270_DATA, 0x00, 0x00,
+                        static_cast<uint8_t>(seq >> 8),
+                        static_cast<uint8_t>(seq & 0xFF) };
+        }
+        payload.insert(payload.end(), rec.begin(), rec.end());
+        return escapeRecord(payload);
+    };
+    auto escaped = frame(record);
+    if (trafficCb_) trafficCb_(true, logCopy ? frame(*logCopy) : escaped);
     return transport_.send(escaped);
 }
 
@@ -80,6 +83,9 @@ void TN3270Session::readLoop() {
         }
     }
     state_ = State::Disconnected;
+    // The reader owns the transport's resources; free them only now that no
+    // recv() is in flight (disconnect() from the UI thread just wakes us).
+    transport_.close();
     if (errorCb_) errorCb_("Connection closed");
 }
 
@@ -278,7 +284,9 @@ void TN3270Session::handleTN3270eSb(const std::vector<uint8_t>& sb) {
             };
             sendSb(payload);
         } else if (sub == TN3270E_REJECT) {
-            // Server rejected our device type — fall back to classic TN3270
+            // Server rejected our device type — tell it we are giving up on
+            // TN3270E (RFC 2355) and fall back to classic TN3270
+            sendWont(OPT_TN3270E);
             tn3270eOffered_ = false;
             tn3270eMode_    = false;
             if (doBinary_ && doEOR_ && doTermType_) {
@@ -289,7 +297,17 @@ void TN3270Session::handleTN3270eSb(const std::vector<uint8_t>& sb) {
         }
     } else if (func == TN3270E_FUNCTIONS && sb.size() >= 3) {
         uint8_t sub = sb[2];
-        if (sub == TN3270E_IS) {
+        if (sub == TN3270E_REQUEST) {
+            // Server counter-proposal (RFC 2355): we support no optional
+            // functions, so agree to an empty list and re-request it otherwise.
+            std::vector<uint8_t> payload = { OPT_TN3270E, TN3270E_FUNCTIONS };
+            payload.push_back(sb.size() == 3 ? TN3270E_IS : TN3270E_REQUEST);
+            sendSb(payload);
+            if (sb.size() == 3) {
+                tn3270eMode_ = true;
+                enterDataMode();
+            }
+        } else if (sub == TN3270E_IS) {
             // Functions agreed — we are in TN3270E mode
             tn3270eMode_ = true;
             enterDataMode();
@@ -315,6 +333,9 @@ void TN3270Session::sendTerminalType() {
 void TN3270Session::enterDataMode() {
     if (state_ == State::Connected) return;
     state_ = State::Connected;
+    // Drop any NVT text (e.g. a banner) received before 3270 mode began, so
+    // it is not prepended to the first 3270 record.
+    currentRecord_.clear();
     if (connectedCb_) connectedCb_();
 }
 

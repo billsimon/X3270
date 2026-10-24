@@ -19,6 +19,8 @@ void DataStream5250Parser::processRecord(const std::vector<uint8_t>& record) {
     sohRemaining_ = 0;
     tdRemaining_  = 0;
     icOrderSeen_  = false;
+    pendingCC2_   = 0;
+    recordOpcode_ = 0;
 
     // Detect and strip GDS header.
     // Java-confirmed format (XI5250Emulator.receivedEOR):
@@ -39,6 +41,7 @@ void DataStream5250Parser::processRecord(const std::vector<uint8_t>& record) {
         {
             uint8_t varHdrLen = data[6];
             size_t  hdrLen    = 6 + static_cast<size_t>(varHdrLen);
+            recordOpcode_     = data[9];
             if (len <= hdrLen) return; // header only, no payload
             data += hdrLen;
             len  -= hdrLen;
@@ -158,6 +161,9 @@ void DataStream5250Parser::processRecord(const std::vector<uint8_t>& record) {
             // Pass pending5250DisplayAttr_ as fgColor so the renderer can use the raw
             // 5250 display attr for colour mapping without losing the protection bits in attr.
             screen_.startField(pendingFieldAttr_, pending5250DisplayAttr_, 0x00, 0x00, flen);
+            Cell& fa = screen_.at((screen_.bufferPointer() - 1 + screen_.size()) % screen_.size());
+            fa.ffw1 = currentFFW1_;   // 0 for output-only fields (no FFW)
+            fa.ffw2 = currentFFW2_;
             state_ = ParseState::Data;
             break;
         }
@@ -171,22 +177,43 @@ void DataStream5250Parser::processRecord(const std::vector<uint8_t>& record) {
             state_ = ParseState::RA_Char;
             break;
         case ParseState::RA_Char: {
+            // 5250 RA repeats *through* the end address (inclusive); an end
+            // address before the current one is invalid and ignored.
             int dest = rowColToOffset(raRow_, raCol_);
-            if (dest >= 0) screen_.repeatToAddress(dest, b);
+            if (dest >= screen_.bufferPointer())
+                screen_.repeatToAddress((dest + 1) % screen_.size(), b);
             state_ = ParseState::Data;
             break;
         }
 
+        // Erase to Address: [row][col][len][len-1 attribute-type bytes]
         case ParseState::EA_Row:
             raRow_ = b;
             state_ = ParseState::EA_Col;
             break;
-        case ParseState::EA_Col: {
-            int dest = rowColToOffset(raRow_, b);
-            if (dest >= 0) screen_.eraseUnprotectedToAddress(dest);
+        case ParseState::EA_Col:
+            raCol_ = b;
+            state_ = ParseState::EA_Len;
+            break;
+        case ParseState::EA_Len:
+            // The length byte counts itself plus the attribute-type bytes.
+            eaTypesLeft_ = (b > 1) ? static_cast<uint8_t>(b - 1) : 0;
+            if (eaTypesLeft_) { state_ = ParseState::EA_Types; break; }
+            eraseToAddress();
             state_ = ParseState::Data;
             break;
-        }
+        case ParseState::EA_Types:
+            if (--eaTypesLeft_ > 0) break;
+            eraseToAddress();
+            state_ = ParseState::Data;
+            break;
+
+        case ParseState::WEC_Data:
+            // Error message text for the message line, up to the next command.
+            if (b == ESC5250)        state_ = ParseState::EscSeen;
+            else if (b >= 0x40)      screen_.writeChar(b);
+            else if (b >= 0x20)      screen_.startInlineAttr5250(b);
+            break;
 
         case ParseState::WEA_Skip:
             if (--sohRemaining_ == 0) state_ = ParseState::Data;
@@ -259,7 +286,8 @@ void DataStream5250Parser::processRecord(const std::vector<uint8_t>& record) {
 
     // After processing all bytes in this record, fire any deferred CC2 actions.
     // (CC2 alarm/unlock apply after the WTD data stream ends.)
-    if (state_ == ParseState::Data || state_ == ParseState::Command) {
+    if (state_ == ParseState::Data || state_ == ParseState::Command ||
+        state_ == ParseState::WEC_Data) {
         if (pendingCC2_ & 0x04) { if (alarmCb_)  alarmCb_(); }
         if (pendingCC2_ & 0x08) {
             if (unlockCb_) unlockCb_();
@@ -282,14 +310,54 @@ void DataStream5250Parser::processRecord(const std::vector<uint8_t>& record) {
 //   bits[7:5] == 0xC0 → reset non-bypass MDT + null MDT non-bypass
 //   bits[7:5] == 0xE0 → reset all MDT + null non-bypass
 void DataStream5250Parser::handleCC1(uint8_t cc1) {
+    bool resetNonBypassMDT = false, resetAllMDT = false;
+    bool nullNonBypassMDT  = false, nullNonBypass = false;
     switch (cc1 & 0xE0) {
-    case 0x00: break; // lock_kb = false — keyboard stays unlocked
-    case 0x40: screen_.resetAllMDT(); break; // reset non-bypass MDT (simplified)
-    case 0x60: screen_.resetAllMDT(); break; // reset all MDT
-    case 0xA0: screen_.resetAllMDT(); break;
-    case 0xC0: screen_.resetAllMDT(); break;
-    case 0xE0: screen_.resetAllMDT(); break;
-    default:   break;
+    case 0x40: resetNonBypassMDT = true; break;
+    case 0x60: resetAllMDT       = true; break;
+    case 0x80: nullNonBypassMDT  = true; break;
+    case 0xA0: resetNonBypassMDT = true; nullNonBypass    = true; break;
+    case 0xC0: resetNonBypassMDT = true; nullNonBypassMDT = true; break;
+    case 0xE0: resetAllMDT       = true; nullNonBypass    = true; break;
+    default:   break;   // 0x00 / 0x20: no field changes
+    }
+    // Null first: "null fields with MDT on" must see the MDTs before reset.
+    for (int fa : inputFields()) {
+        Cell& c = screen_.at(fa);
+        if (nullNonBypass || (nullNonBypassMDT && c.isMDT())) nullField(fa);
+        if (resetNonBypassMDT) c.attr &= ~FA_MDT;
+    }
+    if (resetAllMDT) screen_.resetAllMDT();
+    screen_.markDirty();
+}
+
+// Erase to Address: null the characters from the current address through the
+// end address (inclusive); field attributes stay in place.
+void DataStream5250Parser::eraseToAddress() {
+    int dest = rowColToOffset(raRow_, raCol_);
+    int pos  = screen_.bufferPointer();
+    if (dest < pos) return;   // invalid / no-op
+    for (; pos <= dest; ++pos)
+        if (!screen_.at(pos).isFA) screen_.at(pos).ch = 0x00;
+    screen_.markDirty();
+}
+
+std::vector<int> DataStream5250Parser::inputFields() const {
+    std::vector<int> out;
+    for (int i = 0; i < screen_.size(); ++i) {
+        const Cell& c = screen_.at(i);
+        if (c.isFA && c.fieldLen > 0 && !c.isProtected()) out.push_back(i);
+    }
+    return out;
+}
+
+void DataStream5250Parser::nullField(int faPos) {
+    const int sz = screen_.size();
+    const int len = screen_.at(faPos).fieldLen;
+    for (int k = 1; k <= len; ++k) {
+        Cell& c = screen_.at((faPos + k) % sz);
+        if (c.isFA) break;
+        c.ch = 0x00;
     }
 }
 
@@ -302,20 +370,38 @@ void DataStream5250Parser::handleCommand(uint8_t cmd) {
         break;
 
     case CMD5250_CLEAR_UNIT:
-        screen_.eraseAll();
+        // Clear Unit selects the 24×80 screen, Clear Unit Alternate the
+        // model's 27×132 one (no-op for 24×80-only models).
+        screen_.setAlternateSize(false);
         state_ = ParseState::Command; // no further data; keyboard lock managed by CC2
         break;
 
     case CMD5250_CLEAR_UNIT_ALT:
         // Reference: reads one parameter byte (0x00 or 0x80) then clears screen.
-        screen_.eraseAll();
+        screen_.setAlternateSize(true);
         sohRemaining_ = 1; // reuse as skip counter
         state_ = ParseState::SkipOneThenCommand;
         break;
 
-    case CMD5250_WRITE_ERROR_CODE:
-        // Phase 1: ignore — host is sending an error indicator
-        // (typically followed by a subsequent WTD to redraw the screen)
+    case CMD5250_WRITE_ERROR_CODE: {
+        // Show the message on the last row and keep the keyboard locked until
+        // Reset, which puts the row back (KeyboardState5250::handleReset).
+        screen_.saveErrorLine();
+        int row = (screen_.rows() - 1) * screen_.cols();
+        for (int c = 0; c < screen_.cols(); ++c) screen_.at(row + c) = Cell{};
+        screen_.setBufferAddress(row);
+        if (errorCodeCb_) errorCodeCb_();
+        state_ = ParseState::WEC_Data;
+        break;
+    }
+
+    case CMD5250_READ_IMM:
+        if (readImmediateCb_) readImmediateCb_();
+        state_ = ParseState::Command;
+        break;
+
+    case CMD5250_READ_SCREEN:
+        if (gdsSendCb_) { std::vector<uint8_t> log; auto d = buildReadScreenData(&log); gdsSendCb_(d, recordOpcode_, log); }
         state_ = ParseState::Command;
         break;
 
@@ -328,8 +414,13 @@ void DataStream5250Parser::handleCommand(uint8_t cmd) {
         break;
 
     case CMD5250_SAVE_SCREEN:    // 0x02
+        // Reply with the opcode the host used for the request.
+        if (gdsSendCb_) { std::vector<uint8_t> log; auto d = buildSaveScreenData(&log); gdsSendCb_(d, recordOpcode_, log); }
+        state_ = ParseState::Command;
+        break;
+
     case CMD5250_RESTORE_SCREEN: // 0x12
-        // Not implemented — treat as no-op and return to Command state
+        // The saved data follows as ordinary commands (Clear Unit, WTD, ...).
         state_ = ParseState::Command;
         break;
 
@@ -413,10 +504,11 @@ uint8_t DataStream5250Parser::ffw1ToAttr(uint8_t ffw1) const {
     uint8_t attr = 0x00;
 
     // Protected / bypass field
+    uint8_t shift = ffw1 & FFW1_SHIFT_MASK;
     if (ffw1 & FFW1_BYPASS) {
         attr |= FA_PROTECTED | FA_NUMERIC; // bypass = protected skip field
-    } else if (ffw1 & FFW1_SHIFT_NUM) {
-        attr |= FA_NUMERIC;
+    } else if (shift == FFW1_NUM_ONLY || shift == FFW1_DIGITS_ONLY || shift == FFW1_SIGNED_NUM) {
+        attr |= FA_NUMERIC;                // input restricted (KeyboardState5250)
     }
 
     // MDT
@@ -454,6 +546,83 @@ int DataStream5250Parser::rowColToOffset(uint8_t row, uint8_t col) const {
     return r * screen_.cols() + c;
 }
 
+// ── Save Screen / Read Screen ─────────────────────────────────────────────────
+std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData(std::vector<uint8_t>* logCopy) const {
+    const int sz = screen_.size(), cols = screen_.cols();
+    std::vector<uint8_t> d;
+    std::vector<size_t> hiddenAt;                    // indices of hidden characters in d
+    bool hidden = false;                             // governed by a non-display attribute
+    auto sba = [&](int pos) {
+        d.push_back(ORD5250_SBA);
+        d.push_back(static_cast<uint8_t>(pos / cols + 1));
+        d.push_back(static_cast<uint8_t>(pos % cols + 1));
+    };
+    if (screen_.isAlternateSize()) { d.push_back(ESC5250); d.push_back(CMD5250_CLEAR_UNIT_ALT); d.push_back(0x00); }
+    else                           { d.push_back(ESC5250); d.push_back(CMD5250_CLEAR_UNIT); }
+    d.push_back(ESC5250); d.push_back(CMD5250_WTD);
+    d.push_back(0x00); d.push_back(0x00);           // CC1, CC2: no changes
+    int next = -1;                                   // address the stream is at
+    for (int pos = 0; pos < sz; ++pos) {
+        const Cell& c = screen_.at(pos);
+        uint8_t out;
+        if (c.isFA) {
+            uint8_t disp = c.displayAttr5250();
+            hidden = c.hidesData(true);
+            if (pos != next) sba(pos);
+            if (c.fieldLen > 0) {                    // Start of Field
+                d.push_back(ORD5250_SF);
+                if (c.ffw1) {
+                    // MDT as it is now (typing sets it, CC1 resets it), not as the host sent it
+                    d.push_back(static_cast<uint8_t>((c.ffw1 & ~FFW1_MDT) | (c.isMDT() ? FFW1_MDT : 0)));
+                    d.push_back(c.ffw2);
+                }
+                d.push_back(disp);
+                d.push_back(static_cast<uint8_t>(c.fieldLen >> 8));
+                d.push_back(static_cast<uint8_t>(c.fieldLen & 0xFF));
+            } else {
+                d.push_back(disp);                   // inline attribute
+            }
+            next = pos + 1;
+            continue;
+        }
+        out = c.ch;
+        if (out < 0x40) continue;                    // nulls: skipped via SBA
+        if (pos != next) sba(pos);
+        if (hidden) hiddenAt.push_back(d.size());
+        d.push_back(out);
+        next = pos + 1;
+    }
+    int cur = screen_.cursorPos();
+    d.push_back(ORD5250_IC);
+    d.push_back(static_cast<uint8_t>(cur / cols + 1));
+    d.push_back(static_cast<uint8_t>(cur % cols + 1));
+    if (logCopy) {
+        *logCopy = d;
+        for (size_t i : hiddenAt) (*logCopy)[i] = LOG_MASK_CHAR;
+    }
+    return d;
+}
+
+std::vector<uint8_t> DataStream5250Parser::buildReadScreenData(std::vector<uint8_t>* logCopy) const {
+    std::vector<uint8_t> d;
+    d.reserve(screen_.size());
+    if (logCopy) { logCopy->clear(); logCopy->reserve(screen_.size()); }
+    bool hidden = false;
+    for (int pos = 0; pos < screen_.size(); ++pos) {
+        const Cell& c = screen_.at(pos);
+        if (c.isFA) {
+            uint8_t disp = c.displayAttr5250();
+            hidden = c.hidesData(true);
+            d.push_back(disp);
+            if (logCopy) logCopy->push_back(disp);
+        } else {
+            d.push_back(c.ch);
+            if (logCopy) logCopy->push_back(hidden && c.ch ? LOG_MASK_CHAR : c.ch);
+        }
+    }
+    return d;
+}
+
 // ── Query reply ───────────────────────────────────────────────────────────────
 // Build the 61-byte query reply payload sent in response to CMD_WRITE_STRUCTURED_FIELD
 // with SF type SF_5250_QUERY (0x70) or SF_5250_QUERY_STATION_STATE (0x72).
@@ -483,7 +652,7 @@ int DataStream5250Parser::rowColToOffset(uint8_t row, uint8_t col) const {
 // Reference: lib5250/session.c tn5250_session_query_reply()
 std::vector<uint8_t> DataStream5250Parser::buildQueryReplyPayload() const {
     // EBCDIC digit encoding: '0'-'9' → 0xF0-0xF9
-    const bool wide = (screen_.cols() >= 132);
+    const bool wide = (screen_.maxCols() >= 132);
 
     std::vector<uint8_t> p(61, 0x00);
     p[2]  = 0x88; // Inbound WSF AID
@@ -499,15 +668,15 @@ std::vector<uint8_t> DataStream5250Parser::buildQueryReplyPayload() const {
     p[29] = 0x01; // Type = display emulation
 
     if (wide) {
-        // Terminal type "IBM-3180-2": dev_type=3180, dev_model=2
-        // EBCDIC: '3'=0xF3 '1'=0xF1 '8'=0xF8 '0'=0xF0  model '0'=0xF0 '2'=0xF2
-        p[30]=0xF3; p[31]=0xF1; p[32]=0xF8; p[33]=0xF0;
-        p[35]=0xF0; p[36]=0xF2;
-    } else {
         // Terminal type "IBM-3477-FC": dev_type=3477, dev_model=0 (atoi("FC")=0)
         // EBCDIC: '3'=0xF3 '4'=0xF4 '7'=0xF7 '7'=0xF7  model '0'=0xF0 '0'=0xF0
         p[30]=0xF3; p[31]=0xF4; p[32]=0xF7; p[33]=0xF7;
         p[35]=0xF0; p[36]=0xF0;
+    } else {
+        // Terminal type "IBM-3179-2": dev_type=3179, dev_model=2
+        // EBCDIC: '3'=0xF3 '1'=0xF1 '7'=0xF7 '9'=0xF9  model '0'=0xF0 '2'=0xF2
+        p[30]=0xF3; p[31]=0xF1; p[32]=0xF7; p[33]=0xF9;
+        p[35]=0xF0; p[36]=0xF2;
     }
     // p[34] = 0x00 (separator between type and model)
 

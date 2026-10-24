@@ -135,6 +135,12 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     return [NSColor colorWithRed:0.20 green:0.85 blue:0.20 alpha:1.0];
 }
 
+// YES if characters governed by field attribute cell `fa` must not be shown
+// (password and other non-display fields).  fa == nullptr: unformatted screen.
+static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
+    return fa && fa->hidesData(is5250);
+}
+
 @implementation TerminalView {
     x3270::ScreenBuffer* _screen;
     x3270::KeyboardState* _kbd;     // TN3270 keyboard (nil in 5250 mode)
@@ -147,6 +153,8 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
 
     int      _rows;    // character grid rows (mirrors _screen->rows())
     int      _cols;    // character grid cols (mirrors _screen->cols())
+    int      _maxRows; // layout size: the model's alternate screen, which
+    int      _maxCols; //   Erase/Write (24×80) may temporarily undercut
     CGFloat  _charW;   // character cell width
     CGFloat  _charH;   // character cell height (ascent + descent + leading)
     CGFloat  _baseline; // distance from cell bottom to text baseline
@@ -160,8 +168,8 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
         _codec = x3270::EbcdicCodec(x3270::CodePage::CP037);
         _codec.setHerculesBrackets([[NSUserDefaults standardUserDefaults] boolForKey:kPrefHerculesBrackets]);
         _cursorVisible = YES;
-        _rows = 24;  // default; updated when screen buffer is attached
-        _cols = 80;
+        _rows = _maxRows = 24;  // default; updated when screen buffer is attached
+        _cols = _maxCols = 80;
 
         _selStart = -1;
         _selEnd = -1;
@@ -248,7 +256,7 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
 }
 
 - (NSSize)preferredSize {
-    return NSMakeSize(_charW * _cols, _charH * (_rows + kOIARows));
+    return NSMakeSize(_charW * _maxCols, _charH * (_maxRows + kOIARows));
 }
 
 - (void)setScreenBuffer:(x3270::ScreenBuffer*)screen
@@ -257,8 +265,9 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     _kbd     = kbd;
     _kbd5250 = nullptr;
     if (screen) {
-        _rows = screen->rows();
-        _cols = screen->cols();
+        _maxRows = screen->maxRows();
+        _maxCols = screen->maxCols();
+        [self syncGridSize];
     }
 }
 
@@ -268,9 +277,19 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     _kbd     = nullptr;
     _kbd5250 = kbd;
     if (screen) {
-        _rows = screen->rows();
-        _cols = screen->cols();
+        _maxRows = screen->maxRows();
+        _maxCols = screen->maxCols();
+        [self syncGridSize];
     }
+}
+
+/// Pick up a screen size change (Erase/Write vs Erase/Write Alternate, Clear).
+- (void)syncGridSize {
+    if (!_screen) return;
+    if (_screen->rows() == _rows && _screen->cols() == _cols) return;
+    _rows = _screen->rows();
+    _cols = _screen->cols();
+    _selStart = _selEnd = -1;   // offsets from the old geometry are meaningless
 }
 
 - (void)setGraphicsBuffer:(x3270::GraphicsBuffer*)graphics {
@@ -278,6 +297,7 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
 }
 
 - (void)screenDidUpdate {
+    [self syncGridSize];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self setNeedsDisplay:YES];
     });
@@ -287,6 +307,13 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self setNeedsDisplay:YES];
     });
+}
+
+- (BOOL)isNonDisplayAt:(int)pos {
+    if (!_screen) return NO;
+    int faIdx = _screen->findFieldStart(pos);
+    return fieldIsNonDisplay(faIdx >= 0 ? &_screen->at(faIdx) : nullptr,
+                             _kbd5250 != nullptr);
 }
 
 - (void)blinkCursor:(NSTimer*)timer {
@@ -302,6 +329,13 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     if (!_screen) {
         return;
     }
+    [self syncGridSize];
+
+    const BOOL is5250 = (_kbd5250 != nullptr);
+
+    // Index of the field attribute governing the current cell.  Tracked while
+    // walking the buffer in order — equivalent to findFieldStart(pos) per cell.
+    int faIdx = _screen->findFieldStart(0);
 
     // Draw each cell
     for (int row = 0; row < _rows; ++row) {
@@ -310,34 +344,38 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
             const x3270::Cell& cell = _screen->at(pos);
 
             // Attribute positions are rendered as blanks (background colour only)
-            if (cell.isFA) continue;
+            if (cell.isFA) { faIdx = pos; continue; }
+            const x3270::Cell *fa = (faIdx >= 0) ? &_screen->at(faIdx) : nullptr;
 
             // Skip non-display (password) fields — draw nothing
-            if (cell.isNonDisplay()) continue;
+            if (fieldIsNonDisplay(fa, is5250)) continue;
+
+            // Character attributes (SA) override the field's (SFE); 0 = inherit.
+            uint8_t fgCode    = cell.fgColor   ?: (fa ? fa->fgColor   : 0x00);
+            uint8_t bgCode    = cell.bgColor   ?: (fa ? fa->bgColor   : 0x00);
+            uint8_t highlight = cell.highlight ?: (fa ? fa->highlight : 0x00);
 
             // ── Foreground colour ─────────────────────────────────────────────
             NSColor *fg;
             BOOL    is5250Reverse   = NO;
             BOOL    is5250Underline = NO;
-            
-            if (_kbd5250 != nil) {
+
+            if (is5250) {
                 // 5250 mode
-                int faIdx = _screen->findFieldStart(pos);
-                uint8_t dispAttr = (faIdx >= 0) ? _screen->at(faIdx).fgColor : 0x20;
-                if (dispAttr < 0x20 || dispAttr > 0x3F) dispAttr = 0x20;
+                uint8_t dispAttr = fa ? fa->displayAttr5250() : 0x20;
                 X5250Color base5250;
                 uint8_t    mod5250;
                 decode5250Attr(dispAttr, &base5250, &mod5250);
-                if (mod5250 & X5250ModNonDisp) continue;
                 fg = colorFor5250Attr(dispAttr);
                 is5250Reverse   = (mod5250 & X5250ModReverse)   != 0;
                 is5250Underline = (mod5250 & X5250ModUnderline) != 0;
-            } else if (cell.fgColor != 0x00) {
+            } else if (fgCode != 0x00) {
                 // 3270 Extended Color
-                fg = colorFor3270Code(cell.fgColor) ?: _foregroundColor;
+                fg = colorFor3270Code(fgCode) ?: _foregroundColor;
             } else {
-                // 3270 Base Color
-                int colorIdx = ((cell.attr & 0x20) >> 4) | ((cell.attr & 0x08) >> 3);
+                // 3270 Base Color, from the governing field attribute
+                uint8_t attr = fa ? fa->attr : 0x00;
+                int colorIdx = ((attr & 0x20) >> 4) | ((attr & 0x08) >> 3);
                 switch (colorIdx) {
                 case 1:  fg = _intensifiedColor; break;
                 case 2:  fg = [NSColor colorWithRed:0.22 green:0.52 blue:1.00 alpha:1.0]; break;
@@ -347,12 +385,12 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
             }
 
             // ── Background colour ─────────────────────────────────────────────
-            NSColor *bg = (cell.bgColor != 0x00)
-                ? (colorFor3270Code(cell.bgColor) ?: _backgroundColor)
+            NSColor *bg = (bgCode != 0x00)
+                ? (colorFor3270Code(bgCode) ?: _backgroundColor)
                 : _backgroundColor;
 
             // ── Reverse-video highlight (0xF2) ────────────────────────────────
-            if (cell.highlight == 0xF2 || is5250Reverse) {
+            if (highlight == 0xF2 || is5250Reverse) {
                 NSColor *tmp = fg; fg = bg; bg = tmp;
             }
 
@@ -397,7 +435,7 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
             }
 
             // ── Underscore highlight (0xF4) ───────────────────────────────────
-            if (cell.highlight == 0xF4 || is5250Underline) {
+            if (highlight == 0xF4 || is5250Underline) {
                 [fg setStroke];
                 NSBezierPath *line = [NSBezierPath bezierPath];
                 [line setLineWidth:1.0];
@@ -421,7 +459,7 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
         [_cursorColor setFill];
         NSRectFill(NSMakeRect(cx, cy, _charW, _charH));
 
-        if (!curCell.isFA && !curCell.isNonDisplay()) {
+        if (!curCell.isFA && ![self isNonDisplayAt:curPos]) {
             uint16_t cunicode = _codec.toUnicode(curCell.ch);
             if (cunicode >= 0x20) {
                 NSString *cch = [NSString stringWithFormat:@"%C", (unichar)cunicode];
@@ -450,7 +488,7 @@ static constexpr CGFloat kGocaCellW = 9.0;  // must match AW in buildQueryReply(
 static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply()
 
 - (void)drawGraphicsOverlay:(CGContextRef)ctx {
-    const CGFloat textAreaH = _rows * _charH;
+    const CGFloat textAreaH = _maxRows * _charH;
     const CGFloat textAreaY = kOIARows * _charH; // Cocoa Y of text-area bottom edge
     const CGFloat scaleX    = _charW / kGocaCellW;
     const CGFloat scaleY    = _charH / kGocaCellH;
@@ -559,7 +597,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
 }
 
 - (void)drawOIA {
-    CGFloat oiaY = self.bounds.size.height - (_rows + 1) * _charH;
+    CGFloat oiaY = self.bounds.size.height - (_maxRows + 1) * _charH;
     // Separator line
     [[NSColor colorWithWhite:0.4 alpha:1.0] setFill];
     NSRectFill(NSMakeRect(0, oiaY + _charH - 1, self.bounds.size.width, 1.0));
@@ -664,6 +702,19 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     return [super performKeyEquivalent:event];
 }
 
+/// YES if the key event produced a printable character.  Option-composed
+/// characters count: Option is how a Mac types ¢ ¬ £ on US layouts and
+/// [ ] { } | @ on many European ones (Option shortcuts are matched earlier).
+static BOOL isTypedCharacter(NSEvent *event) {
+    if (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) return NO;
+    NSString *chars = event.characters;
+    if (chars.length == 0) return NO;
+    unichar c = [chars characterAtIndex:0];
+    if (c < 0x20 || (c >= 0x7F && c < 0xA0)) return NO;     // C0/C1 controls, DEL
+    if (c >= 0xF700 && c <= 0xF8FF) return NO;              // AppKit function keys
+    return YES;
+}
+
 - (void)keyDown:(NSEvent *)event {
     if (!_kbd && !_kbd5250) { [super keyDown:event]; return; }
 
@@ -684,14 +735,27 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
             if (shiftDown) pfNum += 12;
             handled = _kbd5250->handlePFKey(pfNum);
         }
+        // Field Exit: Shift+Return, or the keypad Enter key (fn+Return on laptops)
+        else if (key == NSEnterCharacter || ((key == '\r' || key == '\n') && shiftDown)) {
+            handled = _kbd5250->handleFieldExit();
+        }
         else if (key == '\r' || key == '\n') {
             handled = _kbd5250->handleEnter();
         }
-        else if (key == '\t') {
-            handled = _kbd5250->handleTab(altDown);  // Alt+Tab = BackTab
+        // Shift+Tab arrives as NSBackTabCharacter; Option+Tab also backtabs.
+        else if (key == '\t' || key == NSBackTabCharacter) {
+            handled = _kbd5250->handleTab(altDown || key == NSBackTabCharacter);
+        }
+        // Escape keys follow IBM Access Client Solutions: Esc = Attention,
+        // Shift+Esc = SysReq; Option+Esc = Reset (clears an error message).
+        else if (key == 27 && altDown) {
+            handled = _kbd5250->handleReset();
+        }
+        else if (key == 27 && shiftDown) {
+            handled = _kbd5250->handleSysReq();
         }
         else if (key == 27) {
-            handled = _kbd5250->handleAttn(); // Escape = Attention in 5250
+            handled = _kbd5250->handleAttn();
         }
         else if (key == NSPageUpFunctionKey) {
             handled = _kbd5250->handlePageUp();
@@ -721,14 +785,10 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
         else if (key == NSDownArrowFunctionKey)  { handled = _kbd5250->handleArrow(+1, 0); }
         else if (key == NSLeftArrowFunctionKey)  { handled = _kbd5250->handleArrow(0, -1); }
         else if (key == NSRightArrowFunctionKey) { handled = _kbd5250->handleArrow(0, +1); }
-        else if (!altDown) {
-            NSString *chars = event.characters;
-            if (chars.length > 0) {
-                unichar c = [chars characterAtIndex:0];
-                if (c >= 0x20 && c < 0x80) {
-                    handled = _kbd5250->handleChar(static_cast<uint8_t>(c));
-                }
-            }
+        else if (isTypedCharacter(event)) {
+            unichar c = [event.characters characterAtIndex:0];
+            if (_codec.fromUnicode(c) < 0) NSBeep();   // not in this code page
+            else handled = _kbd5250->handleChar(c);
         }
 
         if (handled) {
@@ -758,14 +818,24 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     else if (key == 27 && altDown) {
         handled = _kbd->handleClear();
     }
-    // Enter
+    // Enter: Return or the keypad Enter key (fn+Return on laptops);
+    // Shift+Return = NewLine
+    else if (key == NSEnterCharacter) {
+        handled = _kbd->handleEnter();
+    }
     else if (key == '\r' || key == '\n') {
         if (shiftDown) handled = _kbd->handleNewLine();
         else           handled = _kbd->handleEnter();
     }
-    // Tab / BackTab (Alt+Tab = previous field; Shift+Tab is consumed by NSWindow)
-    else if (key == '\t') {
-        handled = _kbd->handleTab(altDown);
+    // Tab / BackTab: Shift+Tab arrives as NSBackTabCharacter; Option+Tab also backtabs
+    else if (key == '\t' || key == NSBackTabCharacter) {
+        handled = _kbd->handleTab(altDown || key == NSBackTabCharacter);
+    }
+    // ErEOF: Option+Delete (the Mac Delete key, or fn+Delete forward delete).
+    // Must precede the plain Backspace/Delete branches, which would claim it.
+    else if (altDown && (key == NSBackspaceCharacter || key == NSDeleteCharacter ||
+                         key == NSDeleteFunctionKey)) {
+        handled = _kbd->handleEraseEOF();
     }
     // Backspace
     else if (key == NSBackspaceCharacter || key == NSDeleteCharacter) {
@@ -779,6 +849,17 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     else if (key == NSHomeFunctionKey) {
         handled = _kbd->handleHome();
     }
+    // End (fn+Right on laptops): FieldEnd
+    else if (key == NSEndFunctionKey) {
+        handled = _kbd->handleFieldEnd();
+    }
+    // Page Up / Page Down = PF7 / PF8 (ISPF scroll keys, as in wc3270)
+    else if (key == NSPageUpFunctionKey) {
+        handled = _kbd->handlePF(7);
+    }
+    else if (key == NSPageDownFunctionKey) {
+        handled = _kbd->handlePF(8);
+    }
     // Arrow keys
     else if (key == NSUpArrowFunctionKey)    { handled = _kbd->handleCursorUp(); }
     else if (key == NSDownArrowFunctionKey)  { handled = _kbd->handleCursorDown(); }
@@ -789,32 +870,23 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
         _kbd->toggleInsert();
         handled = YES;
     }
-    // ErEOF: Alt+Delete
-    else if (altDown && key == NSDeleteFunctionKey) {
-        handled = _kbd->handleEraseEOF();
-    }
     // ErInput: Alt+E
     else if (altDown && (key == 'e' || key == 'E')) {
         handled = _kbd->handleEraseInput();
     }
-    // Printable ASCII
-    else if (!altDown) {
-        NSString *chars = event.characters;
-        if (chars.length > 0) {
-            unichar c = [chars characterAtIndex:0];
-            if (c >= 0x20 && c < 0x80) {
-                handled = _kbd->handleChar(static_cast<uint8_t>(c));
-            }
-        }
+    // Printable characters
+    else if (isTypedCharacter(event)) {
+        unichar c = [event.characters characterAtIndex:0];
+        if (_codec.fromUnicode(c) < 0) NSBeep();   // not in this code page
+        else handled = _kbd->handleChar(c);
     }
 
     if (handled) {
         [self setNeedsDisplay:YES];
-    } else if (!handled) {
-        // Play system beep on OErr
-        if (_kbd && _kbd->lockReason() == x3270::KeyboardState::LockReason::OErr) {
-            NSBeep();
-        }
+    } else if (_kbd->lockReason() == x3270::KeyboardState::LockReason::OErr) {
+        // Show the OErr indicator and beep
+        [self setNeedsDisplay:YES];
+        NSBeep();
     }
 }
 
@@ -822,6 +894,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
 
 - (int)offsetForPoint:(NSPoint)pt {
     if (!_screen) return -1;
+    [self syncGridSize];
     
     int col = (int)(pt.x / _charW);
     // Cocoa Y is bottom-up, but row 0 is at the top of the terminal grid.
@@ -843,6 +916,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     
     if (offset >= 0) {
         _screen->setCursor(offset);
+        if (_kbd5250) _kbd5250->clearFieldExitRequired();
         _selStart = offset;
         _selEnd = offset;
         [self setNeedsDisplay:YES];
@@ -878,18 +952,9 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
 // ── Clipboard (Copy / Paste) ──────────────────────────────────────────────────
 
 - (uint8_t)ebcdicForUnichar:(unichar)c {
-    // 1. Reverse-lookup using the active Code Page
-    for (int i = 0; i < 256; i++) {
-        if (_codec.toUnicode((uint8_t)i) == c) {
-            return (uint8_t)i;
-        }
-    }
-    // 2. ASCII fallback
-    if (c < 128) {
-        return _codec.fromAscii((uint8_t)c);
-    }
-    // 3. Unmapped character -> EBCDIC '?'
-    return 0x3F;
+    // Same mapping as typed input; unmapped characters paste as EBCDIC '?'
+    int e = _codec.fromUnicode(c);
+    return e >= 0 ? (uint8_t)e : 0x6F;
 }
 
 - (void)copy:(id)sender {
@@ -909,6 +974,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     int maxCol = MAX(c1, c2);
     
     NSMutableString *copiedText = [NSMutableString string];
+    const std::vector<bool> hidden = _screen->hiddenPositions(_kbd5250 != nullptr);
     
     for (int r = minRow; r <= maxRow; ++r) {
         NSMutableString *rowText = [NSMutableString string];
@@ -917,7 +983,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
             int pos = r * _cols + c;
             const x3270::Cell& cell = _screen->at(pos);
             
-            if (cell.isFA || cell.isNonDisplay() || cell.ch == 0x00) {
+            if (cell.isFA || hidden[pos] || cell.ch == 0x00) {
                 [rowText appendString:@" "];
             } else {
                 uint16_t uc = _codec.toUnicode(cell.ch);

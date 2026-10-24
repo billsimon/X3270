@@ -65,11 +65,19 @@ public:
         OErr,     ///< Typing error (protected/full field)
     };
 
-    using SendRecordCallback = std::function<bool(const std::vector<uint8_t>&)>;
+    /// record goes to the host; logCopy has password field data masked (traffic log).
+    using SendRecordCallback = std::function<bool(const std::vector<uint8_t>& record,
+                                                  const std::vector<uint8_t>& logCopy)>;
+    /// Sends an empty record whose GDS header carries `flags` (ATN / SRQ).
+    using SignalCallback     = std::function<bool(uint8_t headerFlags)>;
 
     KeyboardState5250(ScreenBuffer& screen, EbcdicCodec& codec);
 
     void setSendCallback(SendRecordCallback cb) { sendCb_ = std::move(cb); }
+    void setSignalCallback(SignalCallback cb)   { signalCb_ = std::move(cb); }
+
+    /// Host Read Immediate: send the modified fields now, with no AID key.
+    void sendReadImmediate();
 
     void lock(LockReason reason);
     void unlock();
@@ -77,10 +85,15 @@ public:
     LockReason lockReason() const { return lockReason_; }
 
     bool isInsertMode() const { return insertMode_; }
+
+    /// Forget a parked Field-Exit-Required cursor.  Call when something other
+    /// than the editing keys moves the cursor or changes the screen (a host
+    /// record, a mouse click).
+    void clearFieldExitRequired() { ferPos_ = -1; }
     void toggleInsert()       { insertMode_ = !insertMode_; }
 
     // ── Key handlers ──────────────────────────────────────────────────────────
-    bool handleChar(uint8_t asciiChar);
+    bool handleChar(uint32_t unicodeChar);  // typed character (any code page graphic)
     bool handleEbcdicChar(uint8_t ebcdic); // raw EBCDIC input (used for pasting)
     bool handleTab(bool backward = false);
     bool handleEnter();
@@ -90,6 +103,9 @@ public:
     bool handlePageDown();         ///< Roll Up
     bool handleHelp();
     bool handleAttn();
+    bool handleSysReq();
+    bool handleReset();            ///< Clear an error (and its message line)
+    bool handleFieldExit();
     bool handleHome();
     bool handleArrow(int dRow, int dCol);
     bool handleBackspace();
@@ -102,8 +118,17 @@ private:
     EbcdicCodec&  codec_;
 
     SendRecordCallback sendCb_;
+    SignalCallback     signalCb_;
     LockReason  lockReason_ { LockReason::Connecting };
     bool        insertMode_ { false };
+    int         ferPos_     { -1 };   ///< filled Field-Exit-Required field: cursor parked here
+
+    /// FA of the input field whose character positions include `pos`, or -1.
+    int  inputFieldAt(int pos) const;
+    /// One past the last character position of the field whose FA is at `fa`.
+    int  fieldEnd(int fa) const;
+    std::vector<uint8_t> buildInputRecord(uint8_t aidCode, bool includeModifiedFields,
+                                          std::vector<uint8_t>* logCopy = nullptr) const;
 
     uint8_t currentFieldAttr() const;
     bool    isCurrentFieldEditable() const;

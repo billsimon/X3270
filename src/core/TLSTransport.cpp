@@ -5,6 +5,7 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <cerrno>
 #include <cstring>
 #include <vector>
@@ -50,6 +51,10 @@ static int tcpConnect(const std::string& host, uint16_t port, std::string& error
     for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
         sock = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sock < 0) continue;
+        // A write to a socket the peer has reset must fail with EPIPE, not
+        // raise SIGPIPE and kill the app (this covers OpenSSL's writes too).
+        int one = 1;
+        ::setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
         if (::connect(sock, p->ai_addr, p->ai_addrlen) == 0) break;
         ::close(sock);
         sock = -1;
@@ -63,13 +68,23 @@ static int tcpConnect(const std::string& host, uint16_t port, std::string& error
     return sock;
 }
 
+/// Wait until fd is ready for `events`.  Returns false only if the fd is
+/// unusable; readiness, hang-up and timeout all return true so the caller
+/// retries the I/O call and lets it report the real outcome.
+static bool waitFd(int fd, short events, int timeoutMs = -1) {
+    struct pollfd p { fd, events, 0 };
+    int r;
+    do { r = ::poll(&p, 1, timeoutMs); } while (r < 0 && errno == EINTR);
+    return r >= 0 && !(p.revents & POLLNVAL);
+}
+
 // ── TLSTransport ─────────────────────────────────────────────────────────────
 TLSTransport::TLSTransport() {
     std::call_once(g_sslInitFlag, opensslInit);
 }
 
 TLSTransport::~TLSTransport() {
-    disconnect();
+    close();
 }
 
 bool TLSTransport::connect(const std::string& host, uint16_t port,
@@ -77,82 +92,117 @@ bool TLSTransport::connect(const std::string& host, uint16_t port,
                            bool verifyCert,
                            const std::string& caBundle,
                            std::string& errorMsg) {
-    disconnect();
+    close();
 
-    sock_ = tcpConnect(host, port, errorMsg);
-    if (sock_ < 0) return false;
+    int sock = tcpConnect(host, port, errorMsg);
+    if (sock < 0) return false;
+    {
+        // Publish the socket so disconnect() can abort the TLS handshake.
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (aborted_) {
+            ::close(sock);
+            errorMsg = "Connection cancelled";
+            return false;
+        }
+        sock_ = sock;
+    }
 
     useTLS_ = useTLS;
 
     if (useTLS_) {
-        ctx_ = SSL_CTX_new(TLS_client_method());
-        if (!ctx_) {
-            errorMsg = "SSL_CTX_new failed: " + sslLastError();
-            ::close(sock_); sock_ = -1;
+        // Build the SSL objects locally and publish them only once the
+        // handshake is done: disconnect() may run concurrently with it.
+        SSL_CTX* ctx = nullptr;
+        SSL*     ssl = nullptr;
+        auto fail = [&](const std::string& msg) {
+            errorMsg = msg;
+            if (ssl) SSL_free(ssl);
+            if (ctx) SSL_CTX_free(ctx);
+            close();
             return false;
-        }
+        };
+
+        ctx = SSL_CTX_new(TLS_client_method());
+        if (!ctx) return fail("SSL_CTX_new failed: " + sslLastError());
 
         // Certificate verification
         if (verifyCert) {
-            SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
         } else {
         // Disable certificate verification (equivalent to the -noverifycert flag)
-            SSL_CTX_set_verify(ctx_, SSL_VERIFY_NONE, nullptr);
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
         }
 
         if (!caBundle.empty()) {
-            if (SSL_CTX_load_verify_locations(ctx_, caBundle.c_str(), nullptr) != 1) {
-                errorMsg = "Failed to load CA bundle: " + sslLastError();
-                SSL_CTX_free(ctx_); ctx_ = nullptr;
-                ::close(sock_); sock_ = -1;
-                return false;
-            }
+            if (SSL_CTX_load_verify_locations(ctx, caBundle.c_str(), nullptr) != 1)
+                return fail("Failed to load CA bundle: " + sslLastError());
         } else {
             // Use macOS system certificates
-            SSL_CTX_set_default_verify_paths(ctx_);
+            SSL_CTX_set_default_verify_paths(ctx);
         }
 
         // Minimum TLS 1.2
-        SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+        SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+#ifdef SSL_OP_NO_RENEGOTIATION
+        // Renegotiation would let SSL_write consume inbound records behind
+        // the reader thread's back.
+        SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION);
+#endif
 
-        ssl_ = SSL_new(ctx_);
-        if (!ssl_) {
-            errorMsg = "SSL_new failed: " + sslLastError();
-            SSL_CTX_free(ctx_); ctx_ = nullptr;
-            ::close(sock_); sock_ = -1;
-            return false;
-        }
+        ssl = SSL_new(ctx);
+        if (!ssl) return fail("SSL_new failed: " + sslLastError());
 
-        SSL_set_fd(ssl_, sock_);
+        SSL_set_fd(ssl, sock);
         // SNI
-        SSL_set_tlsext_host_name(ssl_, host.c_str());
+        SSL_set_tlsext_host_name(ssl, host.c_str());
         // Hostname verification
-        SSL_set_hostflags(ssl_, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-        if (!SSL_set1_host(ssl_, host.c_str())) {
-            errorMsg = "SSL_set1_host failed";
-            SSL_free(ssl_); ssl_ = nullptr;
-            SSL_CTX_free(ctx_); ctx_ = nullptr;
-            ::close(sock_); sock_ = -1;
-            return false;
-        }
+        SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        if (!SSL_set1_host(ssl, host.c_str()))
+            return fail("SSL_set1_host failed");
 
-        if (SSL_connect(ssl_) != 1) {
-            errorMsg = "TLS handshake failed: " + sslLastError();
-            SSL_free(ssl_); ssl_ = nullptr;
-            SSL_CTX_free(ctx_); ctx_ = nullptr;
-            ::close(sock_); sock_ = -1;
-            return false;
-        }
+        if (SSL_connect(ssl) != 1)
+            return fail("TLS handshake failed: " + sslLastError());
+
+        // From here on reads and writes come from different threads and are
+        // serialised by mutex_, so the socket must never block inside SSL_*.
+        ::fcntl(sock, F_SETFL, ::fcntl(sock, F_GETFL) | O_NONBLOCK);
+
+        std::lock_guard<std::mutex> lk(mutex_);
+        ctx_ = ctx;
+        ssl_ = ssl;
     }
 
-    connected_ = true;
-    return true;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (!aborted_) {
+            connected_ = true;
+            return true;
+        }
+    }
+    errorMsg = "Connection cancelled";
+    close();
+    return false;
 }
 
 void TLSTransport::disconnect() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    aborted_   = true;
     connected_ = false;
+    if (ssl_) { ERR_clear_error(); SSL_shutdown(ssl_); }   // best-effort close_notify
+    if (sock_ >= 0) ::shutdown(sock_, SHUT_RDWR);           // wakes the reader
+}
+
+void TLSTransport::close() {
+    {
+        // Wake any send() blocked in poll() so it releases sendMutex_.
+        std::lock_guard<std::mutex> lk(mutex_);
+        connected_ = false;
+        if (ssl_) { ERR_clear_error(); SSL_shutdown(ssl_); }
+        if (sock_ >= 0) ::shutdown(sock_, SHUT_RDWR);
+    }
+    std::lock_guard<std::mutex> sendLk(sendMutex_);
+    std::lock_guard<std::mutex> lk(mutex_);
     if (ssl_) {
-        SSL_shutdown(ssl_);
         SSL_free(ssl_);
         ssl_ = nullptr;
     }
@@ -167,19 +217,31 @@ void TLSTransport::disconnect() {
 }
 
 bool TLSTransport::send(const uint8_t* data, size_t len) {
-    if (!connected_) return false;
+    std::lock_guard<std::mutex> sendLk(sendMutex_);
 
     size_t sent = 0;
     while (sent < len) {
-        int n;
+        std::unique_lock<std::mutex> lk(mutex_);
+        if (!connected_ || sock_ < 0) return false;
+        int fd = sock_;
         if (useTLS_) {
-            n = SSL_write(ssl_, data + sent, static_cast<int>(len - sent));
-            if (n <= 0) { connected_ = false; return false; }
+            ERR_clear_error();
+            int n = SSL_write(ssl_, data + sent, static_cast<int>(len - sent));
+            if (n > 0) { sent += static_cast<size_t>(n); continue; }
+            int err = SSL_get_error(ssl_, n);
+            lk.unlock();
+            // Retry with the same arguments, as SSL_write requires.
+            if (err == SSL_ERROR_WANT_WRITE && waitFd(fd, POLLOUT)) continue;
+            if (err == SSL_ERROR_WANT_READ  && waitFd(fd, POLLIN, 50)) continue;
         } else {
-            n = static_cast<int>(::write(sock_, data + sent, len - sent));
-            if (n <= 0) { connected_ = false; return false; }
+            // close() holds sendMutex_ while closing, so fd stays valid here.
+            lk.unlock();
+            ssize_t n = ::write(fd, data + sent, len - sent);
+            if (n > 0) { sent += static_cast<size_t>(n); continue; }
+            if (n < 0 && errno == EINTR) continue;
         }
-        sent += static_cast<size_t>(n);
+        connected_ = false;
+        return false;
     }
     return true;
 }
@@ -189,23 +251,34 @@ bool TLSTransport::send(const std::vector<uint8_t>& data) {
 }
 
 int TLSTransport::recv(uint8_t* buf, size_t bufLen) {
-    if (!connected_) return -1;
+    for (;;) {
+        std::unique_lock<std::mutex> lk(mutex_);
+        if (!connected_ || sock_ < 0) return -1;
+        int fd = sock_;
 
-    int n;
-    if (useTLS_) {
-        n = SSL_read(ssl_, buf, static_cast<int>(bufLen));
-        if (n <= 0) {
-            int err = SSL_get_error(ssl_, n);
-            if (err == SSL_ERROR_ZERO_RETURN) return 0; // clean close
+        if (!useTLS_) {
+            // Plain sockets may be read and written concurrently; the read
+            // blocks without the lock and disconnect() wakes it via shutdown().
+            lk.unlock();
+            ssize_t n = ::read(fd, buf, bufLen);
+            if (n > 0) return static_cast<int>(n);
+            if (n == 0) return 0;
+            if (errno == EINTR) continue;
             connected_ = false;
             return -1;
         }
-    } else {
-        n = static_cast<int>(::read(sock_, buf, bufLen));
-        if (n == 0) return 0;
-        if (n < 0) { connected_ = false; return -1; }
+
+        ERR_clear_error();
+        int n = SSL_read(ssl_, buf, static_cast<int>(bufLen));
+        if (n > 0) return n;
+        int err = SSL_get_error(ssl_, n);
+        lk.unlock();
+        if (err == SSL_ERROR_ZERO_RETURN) return 0; // clean close
+        if (err == SSL_ERROR_WANT_READ  && waitFd(fd, POLLIN))  continue;
+        if (err == SSL_ERROR_WANT_WRITE && waitFd(fd, POLLOUT)) continue;
+        connected_ = false;
+        return -1;
     }
-    return n;
 }
 
 } // namespace x3270

@@ -181,14 +181,19 @@ The terminal window opens. Type your credentials at the logon screen. ISPF and T
 | `F1`–`F12` | PF1–PF12 |
 | `Shift`+`F1`–`F12` | PF13–PF24 |
 | `Option`+`1`/`2`/`3` | PA1 / PA2 / PA3 |
-| `Return` | Enter (AID) |
+| `Return` / keypad `Enter` (`fn`+`Return`) | Enter (AID) |
+| `Shift`+`Return` | New Line |
 | `Escape` | Reset (unlock keyboard) |
 | `Option`+`Escape` | Clear screen |
-| `Tab` / `Alt`+`Tab` | Next / previous field |
+| `Tab` / `Shift`+`Tab` (or `Option`+`Tab`) | Next / previous field |
+| `End` (`fn`+`→`) | Field End (after the last character in the field) |
+| `Page Up` / `Page Down` | PF7 / PF8 (ISPF scroll up / down) |
 | `Insert` / `Help` / `⌘`+`I` | Toggle insert mode (any of the three works on Mac) |
 | `Option`+`Delete` | Erase to End of Field |
 | `Option`+`E` | Erase Input (all unprotected fields) |
 | `↑` `↓` `←` `→` | Cursor movement |
+
+Typing, deleting or erasing on a protected position (including a field's attribute byte) locks the keyboard with an operator error, as on a real 3270. `Escape` (Reset) clears it, and, as in x3270, so does any cursor-movement key.
 
 ### Application shortcuts
 

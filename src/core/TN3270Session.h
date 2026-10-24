@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include "TLSTransport.h"
@@ -96,10 +97,15 @@ public:
     void readLoop() override;
 
     /// Send a 3270 aid record to the host (raw 3270 bytes, before Telnet escaping).
-    bool send3270Record(const std::vector<uint8_t>& record);
+    /// The traffic callback sees logCopy (masked) instead, if given.
+    bool send3270Record(const std::vector<uint8_t>& record,
+                        const std::vector<uint8_t>* logCopy = nullptr);
 
     /// ITerminalSession::sendRecord — delegates to send3270Record.
-    bool sendRecord(const std::vector<uint8_t>& record) override { return send3270Record(record); }
+    bool sendRecord(const std::vector<uint8_t>& record,
+                    const std::vector<uint8_t>* logCopy = nullptr) override {
+        return send3270Record(record, logCopy);
+    }
 
     /// Send Telnet IAC IP (ATTN key).
     bool sendATTN();
@@ -131,7 +137,7 @@ private:
     static std::vector<uint8_t> escapeRecord(const std::vector<uint8_t>& raw);
 
     TLSTransport       transport_;
-    State              state_       { State::Disconnected };
+    std::atomic<State> state_       { State::Disconnected };  // written by the network thread, read by the UI
     TelnetState        telnetState_ { TelnetState::Normal };
     TerminalModel      model_       { TerminalModel::Model2 };
 

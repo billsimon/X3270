@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <functional>
 
 namespace x3270 {
@@ -54,6 +55,12 @@ static constexpr uint8_t GDS_OP_OUTPUT_ONLY= 0x02;
 static constexpr uint8_t GDS_OP_PUT_GET    = 0x03; ///< Normal AID input record
 static constexpr uint8_t GDS_OP_READ_IMMED = 0x06;
 
+// GDS variable-header flags byte (tn5250 record.h)
+static constexpr uint8_t GDS_FLAG_ERR = 0x80; ///< data stream output error
+static constexpr uint8_t GDS_FLAG_ATN = 0x40; ///< Attention key
+static constexpr uint8_t GDS_FLAG_SRQ = 0x04; ///< System Request key
+static constexpr uint8_t GDS_FLAG_HLP = 0x01; ///< Help in error state
+
 // ── TN5250Session ─────────────────────────────────────────────────────────────
 class TN5250Session : public ITerminalSession {
 public:
@@ -86,10 +93,14 @@ public:
     bool isConnected() const override { return state_ == State::Connected; }
 
     /// Send a raw 5250 input record (GDS header is added here; uses PUT_GET opcode).
-    bool sendRecord(const std::vector<uint8_t>& record) override;
+    bool sendRecord(const std::vector<uint8_t>& record,
+                    const std::vector<uint8_t>* logCopy = nullptr) override;
 
-    /// Send a raw 5250 record with an explicit GDS opcode.
-    bool sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode);
+    /// Send a raw 5250 record with an explicit GDS opcode and header flags
+    /// (GDS_FLAG_ATN / GDS_FLAG_SRQ for the Attention and SysReq keys).
+    /// The traffic callback sees logCopy (masked) instead of payload, if given.
+    bool sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags = 0x00,
+                       const std::vector<uint8_t>* logCopy = nullptr);
 
     /// Send Telnet IAC IP (Attention / system request).
     bool sendATTN();
@@ -104,7 +115,7 @@ private:
     };
 
     TLSTransport       transport_;
-    State              state_       { State::Disconnected };
+    std::atomic<State> state_       { State::Disconnected };  // written by the network thread, read by the UI
     TelnetState        telnetState_ { TelnetState::Normal };
     TerminalModel      model_       { TerminalModel::Model2 };
 
@@ -149,6 +160,8 @@ private:
     void sendRaw(const std::vector<uint8_t>& data);
 
     std::vector<uint8_t> escapeRecord(const std::vector<uint8_t>& raw);
+    /// Wrap payload in the 10-byte GDS header.
+    static std::vector<uint8_t> gdsFrame(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags);
 
     /// IBM terminal-type string for TN5250 negotiation.
     const char* terminalTypeName() const;

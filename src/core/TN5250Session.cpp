@@ -4,15 +4,17 @@
 namespace x3270 {
 
 // ── Terminal type strings ─────────────────────────────────────────────────────
-// IBM-3477-FC : 24×80 colour display — recognized by IBM i / AS400 Telnet server
-// IBM-3180-2  : 27×132 colour display — recognized by IBM i; "IBM-3477-FC-2" is NOT valid
+// From the tn5250 terminal list:
+// IBM-3179-2  : 24×80 colour display (tn5250's default)
+// IBM-3477-FC : 27×132 colour display (24×80 via Clear Unit, 27×132 via
+//               Clear Unit Alternate).  IBM-3180-2 is 27×132 *monochrome*.
 const char* TN5250Session::terminalTypeName() const {
     switch (model_) {
     case TerminalModel::Model5:
     case TerminalModel::LargeCustom:
-        return "IBM-3180-2";   // 27×132 colour — valid IBM i terminal type
+        return "IBM-3477-FC";
     default:
-        return "IBM-3477-FC";  // 24×80 colour
+        return "IBM-3179-2";
     }
 }
 
@@ -57,21 +59,29 @@ void TN5250Session::disconnect() {
 }
 
 // ── Send path ─────────────────────────────────────────────────────────────────
-bool TN5250Session::sendRecord(const std::vector<uint8_t>& record) {
+bool TN5250Session::sendRecord(const std::vector<uint8_t>& record,
+                               const std::vector<uint8_t>* logCopy) {
     if (state_ != State::Connected) return false;
-    return sendGdsRecord(record, GDS_OP_PUT_GET);
+    return sendGdsRecord(record, GDS_OP_PUT_GET, 0x00, logCopy);
 }
 
-bool TN5250Session::sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode) {
+bool TN5250Session::sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags,
+                                  const std::vector<uint8_t>* logCopy) {
     if (state_ != State::Connected) return false;
+    auto escaped = escapeRecord(gdsFrame(payload, opcode, flags));
+    if (trafficCb_) trafficCb_(true, logCopy ? escapeRecord(gdsFrame(*logCopy, opcode, flags)) : escaped);
+    return transport_.send(escaped);
+}
 
+std::vector<uint8_t> TN5250Session::gdsFrame(const std::vector<uint8_t>& payload,
+                                             uint8_t opcode, uint8_t flags) {
     // Build GDS wrapper — 10-byte header per tn5250 reference (telnetstr.c / record.h):
     //   [0-1] total length (big-endian)
     //   [2]   0x12  GDS record type
     //   [3]   0xA0  reserved
     //   [4-5] 0x00  flowtype (TN5250_RECORD_FLOW_DISPLAY = 0x00)
     //   [6]   0x04  variable header length
-    //   [7]   0x00  flags (TN5250_RECORD_H_NONE)
+    //   [7]   flags (TN5250_RECORD_H_NONE, or ATN/SRQ for those keys)
     //   [8]   0x00  reserved
     //   [9]   opcode (GDS_OP_PUT_GET=0x03 for input records, GDS_OP_NO_OP=0x00 for query reply)
     uint16_t totalLen = static_cast<uint16_t>(GDS_HEADER_LENGTH + payload.size());
@@ -84,14 +94,11 @@ bool TN5250Session::sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t o
     gds.push_back(0x00); // flowtype hi (TN5250_RECORD_FLOW_DISPLAY)
     gds.push_back(0x00); // flowtype lo
     gds.push_back(0x04); // variable header length
-    gds.push_back(0x00); // flags (TN5250_RECORD_H_NONE)
+    gds.push_back(flags); // flags (TN5250_RECORD_H_*)
     gds.push_back(0x00); // reserved
     gds.push_back(opcode); // GDS opcode
     gds.insert(gds.end(), payload.begin(), payload.end());
-
-    auto escaped = escapeRecord(gds);
-    if (trafficCb_) trafficCb_(true, escaped);
-    return transport_.send(escaped);
+    return gds;
 }
 
 bool TN5250Session::sendATTN() {
@@ -112,6 +119,9 @@ void TN5250Session::readLoop() {
         }
     }
     state_ = State::Disconnected;
+    // The reader owns the transport's resources; free them only now that no
+    // recv() is in flight (disconnect() from the UI thread just wakes us).
+    transport_.close();
     if (errorCb_) errorCb_("Connection closed");
 }
 
@@ -298,26 +308,12 @@ void TN5250Session::processSubneg(const std::vector<uint8_t>& sb) {
 }
 
 void TN5250Session::sendNewEnvironIs() {
-    // RFC 1572 NEW-ENVIRON IS response carrying the 5250 workstation device name.
-    // Format: IAC SB NEW-ENVIRON IS  USERVAR "DEVNAME" VALUE "X3270001"  IAC SE
-    //   IS      = 0x00
-    //   USERVAR = 0x03  (IBM-specific variables are USERVARs per RFC 1572)
-    //   VALUE   = 0x01
-    static const uint8_t IS      = 0x00;
-    static const uint8_t USERVAR = 0x03;
-    static const uint8_t VALUE   = 0x01;
-    static const char kVarName[] = "DEVNAME";
-    static const char kDevName[] = "X3270001"; // valid IBM i 8-char workstation name
-
-    std::vector<uint8_t> payload;
-    payload.push_back(TN5250_OPT_NEW_ENVIRON);
-    payload.push_back(IS);
-    payload.push_back(USERVAR);
-    for (const char* p = kVarName; *p; ++p) payload.push_back(static_cast<uint8_t>(*p));
-    payload.push_back(VALUE);
-    for (const char* p = kDevName; *p; ++p) payload.push_back(static_cast<uint8_t>(*p));
-
-    sendSb(payload);
+    // RFC 1572 NEW-ENVIRON IS response.  We send no DEVNAME: with a fixed name
+    // a second session to the same IBM i collides with the first, whereas
+    // without one the server assigns a unique virtual device (QPADEVnnnn).
+    // Format: IAC SB NEW-ENVIRON IS IAC SE   (IS = 0x00)
+    static const uint8_t IS = 0x00;
+    sendSb({ TN5250_OPT_NEW_ENVIRON, IS });
 }
 
 void TN5250Session::sendTerminalType() {

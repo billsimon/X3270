@@ -77,6 +77,12 @@
         _codePage = codePage;
         _model    = model;
         _protocol = protocol;
+        // A 5250 session advertises one of two devices (TN5250Session::
+        // terminalTypeName): IBM-3179-2, 24×80 only, or IBM-3477-FC, 24×80
+        // with a 27×132 alternate.  Size the screen to match.
+        if (_protocol == x3270::TerminalProtocol::TN5250)
+            _model = (model == x3270::TerminalModel::Model5 || model == x3270::TerminalModel::LargeCustom)
+                   ? x3270::TerminalModel::Model5 : x3270::TerminalModel::Model2;
 
         [self buildEngineObjects];
         [self buildUI];
@@ -126,11 +132,12 @@
         _parser5250 = std::make_unique<x3270::DataStream5250Parser>(*_screen);
         _kbd5250    = std::make_unique<x3270::KeyboardState5250>(*_screen, *_codec);
 
+        // The parser runs on the main thread: unlock now, so that a later
+        // record's lock (e.g. a Write Error Code) can't be undone by a
+        // queued unlock from an earlier one.
         _parser5250->setUnlockCallback([weakSelf]() {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong auto s = weakSelf;
-                if (s) s->_kbd5250->unlock();
-            });
+            __strong auto s = weakSelf;
+            if (s) s->_kbd5250->unlock();
         });
         _parser5250->setAlarmCallback([]() {
             dispatch_async(dispatch_get_main_queue(), ^{ NSBeep(); });
@@ -146,9 +153,31 @@
             if (s) session5250->sendGdsRecord(payload, x3270::GDS_OP_NO_OP);
         });
 
-        _kbd5250->setSendCallback([weakSelf](const std::vector<uint8_t>& record) -> bool {
+        // Save Screen / Read Screen replies carry the request's GDS opcode
+        _parser5250->setGdsSendCallback([weakSelf, session5250](const std::vector<uint8_t>& payload, uint8_t opcode,
+                                                                const std::vector<uint8_t>& logCopy) {
             __strong auto s = weakSelf;
-            return s ? s->_session->sendRecord(record) : false;
+            if (s) session5250->sendGdsRecord(payload, opcode, 0x00, &logCopy);
+        });
+        // The parser runs on the main thread, so these can act directly.
+        _parser5250->setErrorCodeCallback([weakSelf]() {
+            __strong auto s = weakSelf;
+            if (s) s->_kbd5250->lock(x3270::KeyboardState5250::LockReason::OErr);
+        });
+        _parser5250->setReadImmediateCallback([weakSelf]() {
+            __strong auto s = weakSelf;
+            if (s) s->_kbd5250->sendReadImmediate();
+        });
+
+        _kbd5250->setSendCallback([weakSelf](const std::vector<uint8_t>& record,
+                                             const std::vector<uint8_t>& logCopy) -> bool {
+            __strong auto s = weakSelf;
+            return s ? s->_session->sendRecord(record, &logCopy) : false;
+        });
+        // Attention / SysReq: empty record with the flag in the GDS header
+        _kbd5250->setSignalCallback([weakSelf, session5250](uint8_t flags) -> bool {
+            __strong auto s = weakSelf;
+            return s ? session5250->sendGdsRecord({}, x3270::GDS_OP_NO_OP, flags) : false;
         });
 
         _session->setDataCallback([weakSelf](const std::vector<uint8_t>& record) {
@@ -167,24 +196,25 @@
                       record.size(), b0, b1, b2, b3, b4, b5);
             }
 
-            // Per the reference (session.c tn5250_session_handle_receive):
-            // PUT_GET (0x03) and INVITE (0x01) opcodes immediately unlock the keyboard
-            // (set invited=1 and clear X_CLOCK indicator) BEFORE processing stream content.
-            if (record.size() >= 10) {
-                uint8_t opcode = record[9];
-                if (opcode == 0x01 || opcode == 0x03) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        __strong auto s2 = weakSelf;
-                        if (s2) s2->_kbd5250->unlock();
-                    });
-                }
-            }
-
-            s->_parser5250->processRecord(record);
-            NSLog(@"[5250] after processRecord: bufPtr=%d", s->_screen->bufferPointer());
+            // The screen buffer and keyboard state are main-thread only (drawRect:
+            // and key handling use them), so parse there too.
+            auto copy = std::make_shared<std::vector<uint8_t>>(record);
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong auto s2 = weakSelf;
-                if (s2) [s2->_termView screenDidUpdate];
+                if (!s2 || s2->_userClosed) return;
+
+                // Per the reference (session.c tn5250_session_handle_receive):
+                // PUT_GET (0x03) and INVITE (0x01) opcodes immediately unlock the keyboard
+                // (set invited=1 and clear X_CLOCK indicator) BEFORE processing stream content.
+                if (copy->size() >= 10) {
+                    uint8_t opcode = (*copy)[9];
+                    if (opcode == 0x01 || opcode == 0x03) s2->_kbd5250->unlock();
+                }
+
+                s2->_parser5250->processRecord(*copy);
+                s2->_kbd5250->clearFieldExitRequired();
+                NSLog(@"[5250] after processRecord: bufPtr=%d", s2->_screen->bufferPointer());
+                [s2->_termView screenDidUpdate];
             });
         });
 
@@ -205,41 +235,50 @@
                 if (s) [s->_termView graphicsDidUpdate];
             });
         });
+        // The parser runs on the main thread: unlock now, so keys typed right
+        // after a keyboard-restoring Write aren't rejected while a queued
+        // unlock waits.
         _parser3270->setUnlockCallback([weakSelf]() {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong auto s = weakSelf;
-                if (s) s->_kbd3270->unlock();
-            });
+            __strong auto s = weakSelf;
+            if (s) s->_kbd3270->unlock();
         });
         _parser3270->setAlarmCallback([]() {
             dispatch_async(dispatch_get_main_queue(), ^{ NSBeep(); });
         });
-        _parser3270->setSendCallback([weakSelf](const std::vector<uint8_t>& data) {
+        // Outbound records come with a copy whose password-field data is
+        // masked; the session logs that copy to the traffic monitor.
+        _parser3270->setSendCallback([weakSelf](const std::vector<uint8_t>& data,
+                                                const std::vector<uint8_t>& logCopy) {
             __strong auto s = weakSelf;
-            if (s) s->_session->sendRecord(data);
+            if (s) s->_session->sendRecord(data, &logCopy);
         });
 
-        _kbd3270->setSendCallback([weakSelf](const std::vector<uint8_t>& record) -> bool {
+        _kbd3270->setSendCallback([weakSelf](const std::vector<uint8_t>& record,
+                                             const std::vector<uint8_t>& logCopy) -> bool {
             __strong auto s = weakSelf;
-            return s ? s->_session->sendRecord(record) : false;
+            return s ? s->_session->sendRecord(record, &logCopy) : false;
         });
 
         _session->setDataCallback([weakSelf](const std::vector<uint8_t>& record) {
             __strong auto s = weakSelf;
             if (!s) return;
-            // TN3270E mode: strip 5-byte header and ignore non-3270-data records
+            // TN3270E mode: strip 5-byte header and ignore non-3270-data records.
+            // (Done here: TN3270E negotiation state belongs to the network thread.)
             auto* s3270 = static_cast<x3270::TN3270Session*>(s->_session.get());
-            const std::vector<uint8_t>* payload = &record;
-            std::vector<uint8_t> stripped;
+            auto payload = std::make_shared<std::vector<uint8_t>>();
             if (s3270->tn3270eActive() && record.size() >= 5) {
                 if (record[0] != 0x00) return;
-                stripped.assign(record.begin() + 5, record.end());
-                payload = &stripped;
+                payload->assign(record.begin() + 5, record.end());
+            } else {
+                *payload = record;
             }
-            s->_parser3270->processRecord(*payload);
+            // The screen buffer and keyboard state are main-thread only (drawRect:
+            // and key handling use them), so parse there too.
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong auto s2 = weakSelf;
-                if (s2) [s2->_termView screenDidUpdate];
+                if (!s2 || s2->_userClosed) return;
+                s2->_parser3270->processRecord(*payload);
+                [s2->_termView screenDidUpdate];
             });
         });
     }
@@ -392,13 +431,15 @@
     int rows = _screen->rows();
     int cols = _screen->cols();
     NSMutableString *text = [NSMutableString stringWithCapacity:(cols + 1) * rows];
+    const std::vector<bool> hidden = _screen->hiddenPositions(_kbd5250 != nullptr);
 
     for (int r = 0; r < rows; r++) {
         for (int c = 0; c < cols; c++) {
             const x3270::Cell &cell = _screen->at(r, c);
-            // Field-attribute cells and NUL/space bytes → space character
+            // Field-attribute cells, hidden fields and NUL/space bytes → space
             if (cell.isFA || cell.ch == 0x00 ||
-                cell.ch == x3270::EbcdicCodec::EBCDIC_SPACE) {
+                cell.ch == x3270::EbcdicCodec::EBCDIC_SPACE ||
+                hidden[r * cols + c]) {
                 [text appendString:@" "];
                 continue;
             }
