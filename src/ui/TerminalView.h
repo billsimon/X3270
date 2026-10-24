@@ -38,6 +38,9 @@ extern NSString * const kPrefHerculesBrackets;
 /// Preferred window content size for the attached screen buffer's model + OIA
 - (NSSize)preferredSize;
 
+/// YES if the character at buffer offset `pos` is in a non-display (hidden) field.
+- (BOOL)isNonDisplayAt:(int)pos;
+
 /// Colour scheme
 @property (nonatomic, strong) NSColor *foregroundColor;
 @property (nonatomic, strong) NSColor *backgroundColor;

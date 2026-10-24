@@ -37,7 +37,6 @@ void ScreenBuffer::eraseAll() {
     }
     cursorPos_        = 0;
     bufPtr_           = 0;
-    currentAttr_      = 0x00;
     currentFgColor_   = 0x00;
     currentBgColor_   = 0x00;
     currentHighlight_ = 0x00;
@@ -46,15 +45,16 @@ void ScreenBuffer::eraseAll() {
 
 void ScreenBuffer::eraseAllUnprotected() {
     const int sz = rows_ * cols_;
+    // Track the governing field while walking the buffer in order; an
+    // unformatted screen (no FA) counts as entirely unprotected.
+    int  fa   = findFieldStart(0);
+    bool prot = fa >= 0 && cells_[fa].isProtected();
     for (int i = 0; i < sz; ++i) {
-        if (!cells_[i].isFA && !cells_[i].isProtected()) {
+        if (cells_[i].isFA) {
+            prot = cells_[i].isProtected();
+            if (!prot) cells_[i].attr &= ~FA_MDT; // clear MDT on unprotected fields
+        } else if (!prot) {
             cells_[i].ch = 0x00;
-        }
-    }
-    // Clear MDT on all unprotected field attrs
-    for (int i = 0; i < sz; ++i) {
-        if (cells_[i].isFA && !cells_[i].isProtected()) {
-            cells_[i].attr &= ~FA_MDT;
         }
     }
     dirty_ = true;
@@ -90,7 +90,7 @@ void ScreenBuffer::setCursorToHome() {
 void ScreenBuffer::writeChar(uint8_t ebcdic) {
     Cell& c     = cells_[bufPtr_];
     c.ch        = ebcdic;
-    c.attr      = currentAttr_;
+    c.attr      = 0x00;
     c.isFA      = false;
     c.fgColor   = currentFgColor_;
     c.bgColor   = currentBgColor_;
@@ -108,11 +108,8 @@ void ScreenBuffer::startField(uint8_t attrByte, uint8_t fgColor, uint8_t bgColor
     c.bgColor   = bgColor;
     c.highlight = highlight;
     c.fieldLen  = fieldLen;
-    // The field’s extended colour becomes the default for subsequent characters
-    currentAttr_      = attrByte;
-    currentFgColor_   = fgColor;
-    currentBgColor_   = bgColor;
-    currentHighlight_ = highlight;
+    // Characters in the field inherit these attributes from the FA cell at
+    // render time; SA character attributes are deliberately left untouched.
     bufPtr_ = clamp(bufPtr_ + 1);
     dirty_ = true;
 }
@@ -135,7 +132,6 @@ void ScreenBuffer::startInlineAttr5250(uint8_t attrByte5250) {
         c.highlight = 0x00;
         c.fieldLen  = 0;
     }
-    currentAttr_      = c.attr;
     currentFgColor_   = safe;
     currentBgColor_   = 0x00;
     currentHighlight_ = 0x00;
@@ -148,7 +144,7 @@ void ScreenBuffer::repeatToAddress(int destOffset, uint8_t ebcdic) {
     while (bufPtr_ != dest) {
         Cell& c     = cells_[bufPtr_];
         c.ch        = ebcdic;
-        c.attr      = currentAttr_;
+        c.attr      = 0x00;
         c.isFA      = false;
         c.fgColor   = currentFgColor_;
         c.bgColor   = currentBgColor_;
@@ -159,10 +155,14 @@ void ScreenBuffer::repeatToAddress(int destOffset, uint8_t ebcdic) {
 }
 
 void ScreenBuffer::eraseUnprotectedToAddress(int destOffset) {
-    int dest = clamp(destOffset);
-    int pos  = bufPtr_;
+    int  dest = clamp(destOffset);
+    int  pos  = bufPtr_;
+    int  fa   = findFieldStart(pos);
+    bool prot = fa >= 0 && cells_[fa].isProtected();
     while (pos != dest) {
-        if (!cells_[pos].isFA && !cells_[pos].isProtected()) {
+        if (cells_[pos].isFA) {
+            prot = cells_[pos].isProtected();
+        } else if (!prot) {
             cells_[pos].ch = 0x00;
         }
         pos = clamp(pos + 1);
@@ -229,6 +229,15 @@ std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool inc
     encodeAddress(cursorPos_, cursorAddr);
     rec.push_back(cursorAddr[0]);
     rec.push_back(cursorAddr[1]);
+
+    // Unformatted screen (no field attributes at all, e.g. CICS after CLEAR or
+    // TSO line mode): send every non-null character in buffer order, no SBAs.
+    if (findFieldStart(0) < 0) {
+        for (const auto& c : cells_) {
+            if (c.ch != 0x00) rec.push_back(c.ch);
+        }
+        return rec;
+    }
 
     // Each modified field: SBA(addr) + data
     auto fields = getModifiedFields(includeProtected);

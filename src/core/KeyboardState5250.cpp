@@ -78,12 +78,14 @@ bool KeyboardState5250::insertCharAtCursor(uint8_t ebcdic) {
 
     // Find the governing FA to get field length
     int faPos = screen_.findFieldStart(cur);
+    bool lastPosInField = false;
     if (faPos >= 0) {
         const Cell& fa = screen_.at(faPos);
         if (fa.fieldLen > 0) {
             // Compute position within field (0-based from first char after FA)
             int firstChar = (faPos + 1) % screen_.size();
             int posInField = (cur - firstChar + screen_.size()) % screen_.size();
+            lastPosInField = (posInField == static_cast<int>(fa.fieldLen) - 1);
             if (posInField >= static_cast<int>(fa.fieldLen)) {
                 // Field is full — lock keyboard with OErr
                 lock(LockReason::OErr);
@@ -110,8 +112,12 @@ bool KeyboardState5250::insertCharAtCursor(uint8_t ebcdic) {
     screen_.setMDT(cur);
     screen_.markDirty();
 
+    // Filling the last position of an input field advances to the next input
+    // field (Field Exit Required from FFW2 is not modelled yet).
     int next = (cur + 1) % screen_.size();
-    if (!screen_.at(next).isFA) {
+    if (faPos >= 0 && (lastPosInField || screen_.at(next).isFA)) {
+        advanceToNextField(true);
+    } else if (!screen_.at(next).isFA) {
         screen_.setCursor(next);
     }
     return true;

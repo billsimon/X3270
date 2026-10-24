@@ -190,8 +190,10 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
 
 void DataStreamParser::doWrite(bool eraseFirst, bool /*alternate*/) {
     if (eraseFirst) {
-        screen_.eraseAll();  // resets bufPtr_, cursorPos_, and currentAttr_
+        screen_.eraseAll();  // resets bufPtr_, cursorPos_ and SA attributes
     }
+    // SA character attributes last only until the end of a Write.
+    screen_.resetCharAttributes();
     // Plain Write: buffer address is unchanged; host uses SBA orders to position.
     state_ = ParseState::WCC;
 }

@@ -396,9 +396,10 @@
     for (int r = 0; r < rows; r++) {
         for (int c = 0; c < cols; c++) {
             const x3270::Cell &cell = _screen->at(r, c);
-            // Field-attribute cells and NUL/space bytes → space character
+            // Field-attribute cells, hidden fields and NUL/space bytes → space
             if (cell.isFA || cell.ch == 0x00 ||
-                cell.ch == x3270::EbcdicCodec::EBCDIC_SPACE) {
+                cell.ch == x3270::EbcdicCodec::EBCDIC_SPACE ||
+                [_termView isNonDisplayAt:r * cols + c]) {
                 [text appendString:@" "];
                 continue;
             }

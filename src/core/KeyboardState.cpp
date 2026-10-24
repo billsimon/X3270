@@ -96,9 +96,16 @@ bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
     screen_.setMDT(cur);
     screen_.markDirty();
 
-    // Advance cursor (stay within field)
+    // Advance cursor.  After the last position of a field the cursor moves
+    // past the next attribute byte; if that field is autoskip (protected +
+    // numeric) it tabs on to the next unprotected field.
     int next = (cur + 1) % screen_.size();
-    if (!screen_.at(next).isFA) {
+    if (screen_.at(next).isFA && screen_.at(next).isSkip()) {
+        screen_.setCursor(next);
+        advanceToNextField(true);
+    } else {
+        while (screen_.at(next).isFA && next != cur)
+            next = (next + 1) % screen_.size();
         screen_.setCursor(next);
     }
     return true;

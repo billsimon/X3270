@@ -135,6 +135,24 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     return [NSColor colorWithRed:0.20 green:0.85 blue:0.20 alpha:1.0];
 }
 
+// The raw 5250 display attribute stored in an FA cell (green/normal if none).
+static uint8_t displayAttr5250(const x3270::Cell *fa) {
+    uint8_t a = fa ? fa->fgColor : 0x20;
+    return (a < 0x20 || a > 0x3F) ? 0x20 : a;
+}
+
+// YES if characters governed by field attribute cell `fa` must not be shown
+// (password and other non-display fields).  fa == nullptr: unformatted screen.
+static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
+    if (!fa) return NO;
+    if (is5250) {
+        uint8_t mod;
+        decode5250Attr(displayAttr5250(fa), NULL, &mod);
+        return (mod & X5250ModNonDisp) != 0;
+    }
+    return fa->isNonDisplay();
+}
+
 @implementation TerminalView {
     x3270::ScreenBuffer* _screen;
     x3270::KeyboardState* _kbd;     // TN3270 keyboard (nil in 5250 mode)
@@ -289,6 +307,13 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     });
 }
 
+- (BOOL)isNonDisplayAt:(int)pos {
+    if (!_screen) return NO;
+    int faIdx = _screen->findFieldStart(pos);
+    return fieldIsNonDisplay(faIdx >= 0 ? &_screen->at(faIdx) : nullptr,
+                             _kbd5250 != nullptr);
+}
+
 - (void)blinkCursor:(NSTimer*)timer {
     _cursorVisible = !_cursorVisible;
     [self setNeedsDisplay:YES];
@@ -303,6 +328,12 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
         return;
     }
 
+    const BOOL is5250 = (_kbd5250 != nullptr);
+
+    // Index of the field attribute governing the current cell.  Tracked while
+    // walking the buffer in order — equivalent to findFieldStart(pos) per cell.
+    int faIdx = _screen->findFieldStart(0);
+
     // Draw each cell
     for (int row = 0; row < _rows; ++row) {
         for (int col = 0; col < _cols; ++col) {
@@ -310,34 +341,38 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
             const x3270::Cell& cell = _screen->at(pos);
 
             // Attribute positions are rendered as blanks (background colour only)
-            if (cell.isFA) continue;
+            if (cell.isFA) { faIdx = pos; continue; }
+            const x3270::Cell *fa = (faIdx >= 0) ? &_screen->at(faIdx) : nullptr;
 
             // Skip non-display (password) fields — draw nothing
-            if (cell.isNonDisplay()) continue;
+            if (fieldIsNonDisplay(fa, is5250)) continue;
+
+            // Character attributes (SA) override the field's (SFE); 0 = inherit.
+            uint8_t fgCode    = cell.fgColor   ?: (fa ? fa->fgColor   : 0x00);
+            uint8_t bgCode    = cell.bgColor   ?: (fa ? fa->bgColor   : 0x00);
+            uint8_t highlight = cell.highlight ?: (fa ? fa->highlight : 0x00);
 
             // ── Foreground colour ─────────────────────────────────────────────
             NSColor *fg;
             BOOL    is5250Reverse   = NO;
             BOOL    is5250Underline = NO;
-            
-            if (_kbd5250 != nil) {
+
+            if (is5250) {
                 // 5250 mode
-                int faIdx = _screen->findFieldStart(pos);
-                uint8_t dispAttr = (faIdx >= 0) ? _screen->at(faIdx).fgColor : 0x20;
-                if (dispAttr < 0x20 || dispAttr > 0x3F) dispAttr = 0x20;
+                uint8_t dispAttr = displayAttr5250(fa);
                 X5250Color base5250;
                 uint8_t    mod5250;
                 decode5250Attr(dispAttr, &base5250, &mod5250);
-                if (mod5250 & X5250ModNonDisp) continue;
                 fg = colorFor5250Attr(dispAttr);
                 is5250Reverse   = (mod5250 & X5250ModReverse)   != 0;
                 is5250Underline = (mod5250 & X5250ModUnderline) != 0;
-            } else if (cell.fgColor != 0x00) {
+            } else if (fgCode != 0x00) {
                 // 3270 Extended Color
-                fg = colorFor3270Code(cell.fgColor) ?: _foregroundColor;
+                fg = colorFor3270Code(fgCode) ?: _foregroundColor;
             } else {
-                // 3270 Base Color
-                int colorIdx = ((cell.attr & 0x20) >> 4) | ((cell.attr & 0x08) >> 3);
+                // 3270 Base Color, from the governing field attribute
+                uint8_t attr = fa ? fa->attr : 0x00;
+                int colorIdx = ((attr & 0x20) >> 4) | ((attr & 0x08) >> 3);
                 switch (colorIdx) {
                 case 1:  fg = _intensifiedColor; break;
                 case 2:  fg = [NSColor colorWithRed:0.22 green:0.52 blue:1.00 alpha:1.0]; break;
@@ -347,12 +382,12 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
             }
 
             // ── Background colour ─────────────────────────────────────────────
-            NSColor *bg = (cell.bgColor != 0x00)
-                ? (colorFor3270Code(cell.bgColor) ?: _backgroundColor)
+            NSColor *bg = (bgCode != 0x00)
+                ? (colorFor3270Code(bgCode) ?: _backgroundColor)
                 : _backgroundColor;
 
             // ── Reverse-video highlight (0xF2) ────────────────────────────────
-            if (cell.highlight == 0xF2 || is5250Reverse) {
+            if (highlight == 0xF2 || is5250Reverse) {
                 NSColor *tmp = fg; fg = bg; bg = tmp;
             }
 
@@ -397,7 +432,7 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
             }
 
             // ── Underscore highlight (0xF4) ───────────────────────────────────
-            if (cell.highlight == 0xF4 || is5250Underline) {
+            if (highlight == 0xF4 || is5250Underline) {
                 [fg setStroke];
                 NSBezierPath *line = [NSBezierPath bezierPath];
                 [line setLineWidth:1.0];
@@ -421,7 +456,7 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
         [_cursorColor setFill];
         NSRectFill(NSMakeRect(cx, cy, _charW, _charH));
 
-        if (!curCell.isFA && !curCell.isNonDisplay()) {
+        if (!curCell.isFA && ![self isNonDisplayAt:curPos]) {
             uint16_t cunicode = _codec.toUnicode(curCell.ch);
             if (cunicode >= 0x20) {
                 NSString *cch = [NSString stringWithFormat:@"%C", (unichar)cunicode];
@@ -767,6 +802,12 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     else if (key == '\t') {
         handled = _kbd->handleTab(altDown);
     }
+    // ErEOF: Option+Delete (the Mac Delete key, or fn+Delete forward delete).
+    // Must precede the plain Backspace/Delete branches, which would claim it.
+    else if (altDown && (key == NSBackspaceCharacter || key == NSDeleteCharacter ||
+                         key == NSDeleteFunctionKey)) {
+        handled = _kbd->handleEraseEOF();
+    }
     // Backspace
     else if (key == NSBackspaceCharacter || key == NSDeleteCharacter) {
         handled = _kbd->handleBackspace();
@@ -788,10 +829,6 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     else if (key == NSInsertFunctionKey || key == NSHelpFunctionKey) {
         _kbd->toggleInsert();
         handled = YES;
-    }
-    // ErEOF: Alt+Delete
-    else if (altDown && key == NSDeleteFunctionKey) {
-        handled = _kbd->handleEraseEOF();
     }
     // ErInput: Alt+E
     else if (altDown && (key == 'e' || key == 'E')) {
@@ -917,7 +954,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
             int pos = r * _cols + c;
             const x3270::Cell& cell = _screen->at(pos);
             
-            if (cell.isFA || cell.isNonDisplay() || cell.ch == 0x00) {
+            if (cell.isFA || [self isNonDisplayAt:pos] || cell.ch == 0x00) {
                 [rowText appendString:@" "];
             } else {
                 uint16_t uc = _codec.toUnicode(cell.ch);

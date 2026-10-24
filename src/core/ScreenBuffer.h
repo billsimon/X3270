@@ -22,10 +22,12 @@ static constexpr uint8_t FA_MDT        = 0x01;
 // ── Cell ─────────────────────────────────────────────────────────────────────
 struct Cell {
     uint8_t  ch        { 0x00 }; // EBCDIC character byte (0x00 = empty/null)
-    uint8_t  attr      { 0x00 }; // Field attribute byte of the governing field
+    uint8_t  attr      { 0x00 }; // (FA cells only) field attribute byte; use findFieldStart()
+                                 // to get the field governing a character cell
     bool     isFA      { false }; // true if this cell IS a field attribute position
-    // Extended colour/highlight attributes (from SA or SFE orders):
-    // 0x00 = use field-attribute default; 0xF1-0xF7 = IBM 3279 colour index
+    // Extended colour/highlight attributes. On FA cells these are the field's
+    // attributes (SFE); on character cells they are character attributes (SA).
+    // 0x00 = inherit from the governing field; 0xF1-0xF7 = IBM 3279 colour index
     uint8_t  fgColor   { 0x00 }; // foreground colour (0=field-default)
     uint8_t  bgColor   { 0x00 }; // background colour (0=black)
     uint8_t  highlight { 0x00 }; // 0=normal, 0xF2=reverse, 0xF4=underscore, 0xF1=blink
@@ -89,6 +91,9 @@ public:
     void setCurrentFgColor(uint8_t c)   { currentFgColor_   = c; }
     void setCurrentBgColor(uint8_t c)   { currentBgColor_   = c; }
     void setCurrentHighlight(uint8_t c) { currentHighlight_ = c; }
+
+    /// Reset the SA character attributes to "inherit from field" (start of each Write).
+    void resetCharAttributes() { currentFgColor_ = currentBgColor_ = currentHighlight_ = 0x00; }
 
     /// Set buffer pointer (SetBufferAddress order)
     void setBufferAddress(int offset) { bufPtr_ = clamp(offset); }
@@ -155,10 +160,9 @@ private:
     int     cursorPos_        { 0 };
     int     bufPtr_           { 0 };
     bool    dirty_            { false };
-    uint8_t currentAttr_      { 0x00 };  // field attr of the most-recently opened field
-    uint8_t currentFgColor_   { 0x00 };  // active extended fg colour (SA or SFE)
-    uint8_t currentBgColor_   { 0x00 };  // active extended bg colour
-    uint8_t currentHighlight_ { 0x00 };  // active highlight (reverse/underscore/blink)
+    uint8_t currentFgColor_   { 0x00 };  // active SA character fg colour
+    uint8_t currentBgColor_   { 0x00 };  // active SA character bg colour
+    uint8_t currentHighlight_ { 0x00 };  // active SA highlight (reverse/underscore/blink)
 
     // Buffer address code table (64 entries, 6-bit index → 8-bit wire byte)
     static const uint8_t kCodeTable[64];
