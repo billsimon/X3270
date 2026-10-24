@@ -269,15 +269,8 @@ void DataStreamParser::programTab() {
         lastZpt_ = false;
         return;
     }
-    int target = 0;
-    for (int pos = cur; ; ) {
-        int next = (pos + 1) % sz;
-        const Cell& c = screen_.at(pos);
-        if (c.isFA && !c.isProtected() && !screen_.at(next).isFA) { target = next; break; }
-        pos = next;
-        if (pos == cur) break;
-    }
-    if (target < cur) target = 0;
+    int target = screen_.nextUnprotected(cur);
+    if (target < cur) target = 0;                  // none, or only by wrapping
 
     if (!lastWasOrder_ || lastZpt_) {
         for (int pos = cur; pos != target && !screen_.at(pos).isFA; pos = (pos + 1) % sz)

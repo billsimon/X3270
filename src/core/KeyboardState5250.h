@@ -85,6 +85,11 @@ public:
     LockReason lockReason() const { return lockReason_; }
 
     bool isInsertMode() const { return insertMode_; }
+
+    /// Forget a parked Field-Exit-Required cursor.  Call when something other
+    /// than the editing keys moves the cursor or changes the screen (a host
+    /// record, a mouse click).
+    void clearFieldExitRequired() { ferPos_ = -1; }
     void toggleInsert()       { insertMode_ = !insertMode_; }
 
     // ── Key handlers ──────────────────────────────────────────────────────────

@@ -135,22 +135,10 @@ static NSColor *colorFor5250Attr(uint8_t attr) {
     return [NSColor colorWithRed:0.20 green:0.85 blue:0.20 alpha:1.0];
 }
 
-// The raw 5250 display attribute stored in an FA cell (green/normal if none).
-static uint8_t displayAttr5250(const x3270::Cell *fa) {
-    uint8_t a = fa ? fa->fgColor : 0x20;
-    return (a < 0x20 || a > 0x3F) ? 0x20 : a;
-}
-
 // YES if characters governed by field attribute cell `fa` must not be shown
 // (password and other non-display fields).  fa == nullptr: unformatted screen.
 static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
-    if (!fa) return NO;
-    if (is5250) {
-        uint8_t mod;
-        decode5250Attr(displayAttr5250(fa), NULL, &mod);
-        return (mod & X5250ModNonDisp) != 0;
-    }
-    return fa->isNonDisplay();
+    return fa && fa->hidesData(is5250);
 }
 
 @implementation TerminalView {
@@ -374,7 +362,7 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
 
             if (is5250) {
                 // 5250 mode
-                uint8_t dispAttr = displayAttr5250(fa);
+                uint8_t dispAttr = fa ? fa->displayAttr5250() : 0x20;
                 X5250Color base5250;
                 uint8_t    mod5250;
                 decode5250Attr(dispAttr, &base5250, &mod5250);
@@ -928,6 +916,7 @@ static BOOL isTypedCharacter(NSEvent *event) {
     
     if (offset >= 0) {
         _screen->setCursor(offset);
+        if (_kbd5250) _kbd5250->clearFieldExitRequired();
         _selStart = offset;
         _selEnd = offset;
         [self setNeedsDisplay:YES];
@@ -985,6 +974,7 @@ static BOOL isTypedCharacter(NSEvent *event) {
     int maxCol = MAX(c1, c2);
     
     NSMutableString *copiedText = [NSMutableString string];
+    const std::vector<bool> hidden = _screen->hiddenPositions(_kbd5250 != nullptr);
     
     for (int r = minRow; r <= maxRow; ++r) {
         NSMutableString *rowText = [NSMutableString string];
@@ -993,7 +983,7 @@ static BOOL isTypedCharacter(NSEvent *event) {
             int pos = r * _cols + c;
             const x3270::Cell& cell = _screen->at(pos);
             
-            if (cell.isFA || [self isNonDisplayAt:pos] || cell.ch == 0x00) {
+            if (cell.isFA || hidden[pos] || cell.ch == 0x00) {
                 [rowText appendString:@" "];
             } else {
                 uint16_t uc = _codec.toUnicode(cell.ch);

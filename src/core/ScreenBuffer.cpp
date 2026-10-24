@@ -77,11 +77,23 @@ void ScreenBuffer::resetAllMDT() {
     dirty_ = true;
 }
 
+int ScreenBuffer::nextUnprotected(int from) const {
+    const int sz = size();
+    for (int i = 0; i < sz; ++i) {
+        int pos  = (from + i) % sz;
+        int next = (pos + 1) % sz;
+        if (cells_[pos].isFA && !cells_[pos].isProtected() && !cells_[next].isFA) return next;
+    }
+    return -1;
+}
+
 void ScreenBuffer::setCursorToHome() {
     // Walk cells in order and find the first FA cell that is editable (not protected,
     // not bypass).  In 5250 mode, input fields have attr = ffw1ToAttr(FFW1) which
     // leaves FA_PROTECTED(0x20) clear for normal input fields and sets it only for
     // bypass fields.  In 3270 mode this finds the first unprotected field.
+    // Unlike nextUnprotected() a zero-length field counts: x3270's Erase All
+    // Unprotected also puts the cursor just past the first unprotected FA.
     const int sz = rows_ * cols_;
     for (int i = 0; i < sz; ++i) {
         if (cells_[i].isFA && !cells_[i].isProtected()) {
@@ -203,6 +215,17 @@ int ScreenBuffer::findFieldStart(int bufPos) const {
         if (cells_[pos].isFA) return pos;
     }
     return -1; // no FA found (entire screen is unformatted)
+}
+
+std::vector<bool> ScreenBuffer::hiddenPositions(bool is5250) const {
+    const int sz = size();
+    std::vector<bool> hidden(sz, false);
+    int fa = findFieldStart(0);
+    for (int pos = 0; pos < sz; ++pos) {
+        if (cells_[pos].isFA) { fa = pos; continue; }
+        hidden[pos] = fa >= 0 && cells_[fa].hidesData(is5250);
+    }
+    return hidden;
 }
 
 // ── 5250 error line ───────────────────────────────────────────────────────────

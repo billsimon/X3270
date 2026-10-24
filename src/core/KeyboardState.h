@@ -83,7 +83,6 @@ public:
 
 private:
     void sendAID(uint8_t aidCode);
-    int  nextUnprotected(int from) const;
     void moveCursorToFirstUnprotected();
     void advanceToNextField(bool forward);
     // Returns the field attribute governing cursorPos, or 0 if unformatted

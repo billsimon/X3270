@@ -77,6 +77,12 @@
         _codePage = codePage;
         _model    = model;
         _protocol = protocol;
+        // A 5250 session advertises one of two devices (TN5250Session::
+        // terminalTypeName): IBM-3179-2, 24×80 only, or IBM-3477-FC, 24×80
+        // with a 27×132 alternate.  Size the screen to match.
+        if (_protocol == x3270::TerminalProtocol::TN5250)
+            _model = (model == x3270::TerminalModel::Model5 || model == x3270::TerminalModel::LargeCustom)
+                   ? x3270::TerminalModel::Model5 : x3270::TerminalModel::Model2;
 
         [self buildEngineObjects];
         [self buildUI];
@@ -126,11 +132,12 @@
         _parser5250 = std::make_unique<x3270::DataStream5250Parser>(*_screen);
         _kbd5250    = std::make_unique<x3270::KeyboardState5250>(*_screen, *_codec);
 
+        // The parser runs on the main thread: unlock now, so that a later
+        // record's lock (e.g. a Write Error Code) can't be undone by a
+        // queued unlock from an earlier one.
         _parser5250->setUnlockCallback([weakSelf]() {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong auto s = weakSelf;
-                if (s) s->_kbd5250->unlock();
-            });
+            __strong auto s = weakSelf;
+            if (s) s->_kbd5250->unlock();
         });
         _parser5250->setAlarmCallback([]() {
             dispatch_async(dispatch_get_main_queue(), ^{ NSBeep(); });
@@ -205,6 +212,7 @@
                 }
 
                 s2->_parser5250->processRecord(*copy);
+                s2->_kbd5250->clearFieldExitRequired();
                 NSLog(@"[5250] after processRecord: bufPtr=%d", s2->_screen->bufferPointer());
                 [s2->_termView screenDidUpdate];
             });
@@ -227,11 +235,12 @@
                 if (s) [s->_termView graphicsDidUpdate];
             });
         });
+        // The parser runs on the main thread: unlock now, so keys typed right
+        // after a keyboard-restoring Write aren't rejected while a queued
+        // unlock waits.
         _parser3270->setUnlockCallback([weakSelf]() {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong auto s = weakSelf;
-                if (s) s->_kbd3270->unlock();
-            });
+            __strong auto s = weakSelf;
+            if (s) s->_kbd3270->unlock();
         });
         _parser3270->setAlarmCallback([]() {
             dispatch_async(dispatch_get_main_queue(), ^{ NSBeep(); });
@@ -422,6 +431,7 @@
     int rows = _screen->rows();
     int cols = _screen->cols();
     NSMutableString *text = [NSMutableString stringWithCapacity:(cols + 1) * rows];
+    const std::vector<bool> hidden = _screen->hiddenPositions(_kbd5250 != nullptr);
 
     for (int r = 0; r < rows; r++) {
         for (int c = 0; c < cols; c++) {
@@ -429,7 +439,7 @@
             // Field-attribute cells, hidden fields and NUL/space bytes → space
             if (cell.isFA || cell.ch == 0x00 ||
                 cell.ch == x3270::EbcdicCodec::EBCDIC_SPACE ||
-                [_termView isNonDisplayAt:r * cols + c]) {
+                hidden[r * cols + c]) {
                 [text appendString:@" "];
                 continue;
             }

@@ -16,6 +16,9 @@ void KeyboardState5250::lock(LockReason reason) {
 void KeyboardState5250::unlock() {
     lockReason_ = LockReason::None;
     insertMode_ = false;
+    // Leaving the error state other than by Reset (e.g. a host CC2 unlock):
+    // the row saved by Write Error Code no longer belongs on the screen.
+    screen_.discardErrorLine();
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -253,7 +256,7 @@ std::vector<uint8_t> KeyboardState5250::buildInputRecord(uint8_t aidCode, bool i
                     inField    = 1;
                     fieldStart = i;
                     fieldLeft  = c.fieldLen > 0 ? c.fieldLen : screen_.size();
-                    hidden     = isNonDisplay5250(c.fgColor);
+                    hidden     = c.hidesData(true);
                 } else {
                     inField    = 0;
                     fieldStart = -1;
@@ -345,17 +348,19 @@ bool KeyboardState5250::handleHelp() {
 // Attention and System Request are not AIDs: they are empty records with the
 // ATN / SRQ flag in the GDS header (tn5250 TN5250_RECORD_H_ATN / _H_SRQ).
 bool KeyboardState5250::handleAttn() {
+    ferPos_ = -1;
     if (isLocked()) unlock();
     return signalCb_ ? signalCb_(0x40) : false;
 }
 
 bool KeyboardState5250::handleSysReq() {
+    ferPos_ = -1;
     return signalCb_ ? signalCb_(0x04) : false;
 }
 
 bool KeyboardState5250::handleReset() {
+    screen_.restoreErrorLine();   // before unlock(), which discards it
     if (lockReason_ == LockReason::OErr || lockReason_ == LockReason::System) unlock();
-    screen_.restoreErrorLine();
     screen_.markDirty();
     insertMode_ = false;
     return true;
@@ -397,6 +402,7 @@ bool KeyboardState5250::handleFieldExit() {
 
 bool KeyboardState5250::handleHome() {
     if (isLocked()) return false;
+    ferPos_ = -1;
     moveCursorToFirstUnprotected();
     return true;
 }

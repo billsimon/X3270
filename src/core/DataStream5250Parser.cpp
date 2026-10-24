@@ -566,12 +566,16 @@ std::vector<uint8_t> DataStream5250Parser::buildSaveScreenData(std::vector<uint8
         const Cell& c = screen_.at(pos);
         uint8_t out;
         if (c.isFA) {
-            uint8_t disp = (c.fgColor >= 0x20 && c.fgColor <= 0x3F) ? c.fgColor : 0x20;
-            hidden = isNonDisplay5250(disp);
+            uint8_t disp = c.displayAttr5250();
+            hidden = c.hidesData(true);
             if (pos != next) sba(pos);
             if (c.fieldLen > 0) {                    // Start of Field
                 d.push_back(ORD5250_SF);
-                if (c.ffw1) { d.push_back(c.ffw1); d.push_back(c.ffw2); }
+                if (c.ffw1) {
+                    // MDT as it is now (typing sets it, CC1 resets it), not as the host sent it
+                    d.push_back(static_cast<uint8_t>((c.ffw1 & ~FFW1_MDT) | (c.isMDT() ? FFW1_MDT : 0)));
+                    d.push_back(c.ffw2);
+                }
                 d.push_back(disp);
                 d.push_back(static_cast<uint8_t>(c.fieldLen >> 8));
                 d.push_back(static_cast<uint8_t>(c.fieldLen & 0xFF));
@@ -607,8 +611,8 @@ std::vector<uint8_t> DataStream5250Parser::buildReadScreenData(std::vector<uint8
     for (int pos = 0; pos < screen_.size(); ++pos) {
         const Cell& c = screen_.at(pos);
         if (c.isFA) {
-            uint8_t disp = (c.fgColor >= 0x20 && c.fgColor <= 0x3F) ? c.fgColor : 0x20;
-            hidden = isNonDisplay5250(disp);
+            uint8_t disp = c.displayAttr5250();
+            hidden = c.hidesData(true);
             d.push_back(disp);
             if (logCopy) logCopy->push_back(disp);
         } else {

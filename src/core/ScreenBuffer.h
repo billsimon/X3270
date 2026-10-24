@@ -53,6 +53,13 @@ struct Cell {
     bool isNonDisplay() const { return (attr & 0x0C) == FA_NONDISPLAY; }
     bool isIntensified()const { return (attr & 0x0C) == FA_INTENSIFIED; }
     bool isMDT()        const { return (attr & FA_MDT) != 0; }
+
+    /// (5250 FA cells) the display attribute 0x20-0x3F kept in fgColor; green/normal if none.
+    uint8_t displayAttr5250() const { return (fgColor >= 0x20 && fgColor <= 0x3F) ? fgColor : 0x20; }
+    /// (FA cells) the characters this field governs must not be shown (password fields).
+    bool hidesData(bool is5250) const {
+        return is5250 ? isNonDisplay5250(displayAttr5250()) : isNonDisplay();
+    }
 };
 
 // ── ScreenBuffer ──────────────────────────────────────────────────────────────
@@ -173,6 +180,10 @@ public:
     /// was seen in the WTD data stream (mirrors tn5250_display_set_cursor_home).
     void setCursorToHome();
 
+    /// First character position of the first unprotected field whose FA is at
+    /// or after `from` (wrapping), skipping zero-length fields; -1 if none.
+    int nextUnprotected(int from) const;
+
     /// Set MDT on the field that owns the given buffer position
     void setMDT(int bufferPos);
 
@@ -182,6 +193,8 @@ public:
     /// Put back the row saved by saveErrorLine(); no-op if none is saved.
     void restoreErrorLine();
     bool hasSavedErrorLine() const { return !savedErrorLine_.empty(); }
+    /// Drop the saved row without restoring it (the host has moved on).
+    void discardErrorLine() { savedErrorLine_.clear(); }
 
     // ── 3270 Buffer Address encoding/decoding ────────────────────────────────
     static int  decodeAddress(uint8_t b0, uint8_t b1);
@@ -197,6 +210,10 @@ public:
     /// Find the field attribute cell that governs bufPos.
     /// Returns the index of the FA cell, or -1 if the screen is unformatted.
     int findFieldStart(int bufPos) const;
+
+    /// For every position, whether it is a character in a non-display
+    /// (password) field.  One pass, for callers that walk the whole screen.
+    std::vector<bool> hiddenPositions(bool is5250) const;
 
 private:
     int clamp(int pos) const {

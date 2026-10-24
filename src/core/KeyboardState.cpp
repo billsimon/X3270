@@ -51,19 +51,8 @@ bool KeyboardState::readyToMoveCursor() {
 
 // First character of the next unprotected field after `from` (exclusive of
 // fields with no character positions), or -1 if there is none.
-int KeyboardState::nextUnprotected(int from) const {
-    const int sz = screen_.size();
-    for (int i = 0; i < sz; ++i) {
-        int pos  = (from + i) % sz;
-        int next = (pos + 1) % sz;
-        const Cell& c = screen_.at(pos);
-        if (c.isFA && !c.isProtected() && !screen_.at(next).isFA) return next;
-    }
-    return -1;
-}
-
 void KeyboardState::moveCursorToFirstUnprotected() {
-    int pos = nextUnprotected(0);
+    int pos = screen_.nextUnprotected(0);
     screen_.setCursor(pos >= 0 ? pos : 0);
 }
 
@@ -298,7 +287,7 @@ bool KeyboardState::handleNewLine() {
         screen_.setCursor(nextRowStart);   // unformatted, or inside an input field
         return true;
     }
-    int pos = nextUnprotected(nextRowStart);
+    int pos = screen_.nextUnprotected(nextRowStart);
     screen_.setCursor(pos >= 0 ? pos : 0);
     return true;
 }
