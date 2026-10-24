@@ -85,6 +85,15 @@ void KeyboardState::advanceToNextField(bool forward) {
     }
 }
 
+void KeyboardState::moveCharacter(int from, int to) {
+    const Cell& src = screen_.at(from);
+    Cell&       dst = screen_.at(to);
+    dst.ch        = src.ch;
+    dst.fgColor   = src.fgColor;
+    dst.bgColor   = src.bgColor;
+    dst.highlight = src.highlight;
+}
+
 int KeyboardState::lastPosInField(int pos) const {
     const int sz = screen_.size();
     for (int i = 1; i < sz; ++i) {
@@ -110,12 +119,16 @@ bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
         int shiftEnd = lastCell;
         while (shiftEnd != cur) {
             int prev = (shiftEnd - 1 + screen_.size()) % screen_.size();
-            screen_.at(shiftEnd).ch = screen_.at(prev).ch;
+            moveCharacter(prev, shiftEnd);
             shiftEnd = prev;
         }
     }
 
-    screen_.at(cur).ch = ebcdic;
+    // A typed character has no character attributes of its own: it takes
+    // the field's colour and highlighting, as in x3270.
+    Cell& typed = screen_.at(cur);
+    typed.ch = ebcdic;
+    typed.fgColor = typed.bgColor = typed.highlight = 0x00;
     screen_.setMDT(cur);
     screen_.markDirty();
 
@@ -135,20 +148,13 @@ bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
 }
 
 // ── AID transmission ──────────────────────────────────────────────────────────
-void KeyboardState::sendAID(uint8_t aidCode, bool includeModifiedFields) {
-    std::vector<uint8_t> record, logCopy;
-    if (includeModifiedFields) {
-        record = screen_.buildReadModifiedRecord(aidCode, false, &logCopy);
-    } else {
-        // PA keys and CLEAR are a "short read": the AID byte alone.
-        record.push_back(aidCode);
-        logCopy = record;
-    }
+void KeyboardState::sendAID(uint8_t aidCode) {
+    // PA keys and CLEAR are a "short read" (the AID byte alone); the
+    // record builder handles that.  Later host reads report this AID.
+    std::vector<uint8_t> logCopy;
+    auto record = screen_.buildReadModifiedRecord(aidCode, false, &logCopy);
+    screen_.setAid(aidCode);
     if (sendCb_ && sendCb_(record, logCopy)) lock(LockReason::System);
-}
-
-void KeyboardState::sendPAKey(uint8_t aidCode) {
-    sendAID(aidCode, false);
 }
 
 // ── Key handlers ──────────────────────────────────────────────────────────────
@@ -179,7 +185,7 @@ bool KeyboardState::handleTab(bool backward) {
 bool KeyboardState::handleEnter() {
     if (isLocked()) return false;
     insertMode_ = false;
-    sendAID(AID_ENTER, true);
+    sendAID(AID_ENTER);
     return true;
 }
 
@@ -189,35 +195,33 @@ bool KeyboardState::handleClear() {
     if (isLocked()) return false;
     insertMode_ = false;
     screen_.setAlternateSize(false);
-    sendAID(AID_CLEAR, false);
+    sendAID(AID_CLEAR);
     return true;
 }
 
 bool KeyboardState::handlePF(int n) {
     if (isLocked()) return false;
-    sendAID(pfAID(n), true);
+    sendAID(pfAID(n));
     return true;
 }
 
 bool KeyboardState::handlePA(int n) {
     if (isLocked()) return false;
     uint8_t aidCode = (n == 1) ? AID_PA1 : (n == 2) ? AID_PA2 : AID_PA3;
-    sendPAKey(aidCode);
+    sendAID(aidCode);
     return true;
 }
 
 bool KeyboardState::handleBackspace() {
+    // As x3270's Erase: nothing at the first character of a field;
+    // otherwise move left and Delete there, which shifts the rest of the
+    // field left (and is an operator error on a protected position).
     if (isLocked()) return false;
-    if (!requireEditableCursor()) return false;
-    int cur = screen_.cursorPos();
+    int cur  = screen_.cursorPos();
     int prev = (cur - 1 + screen_.size()) % screen_.size();
-    // Don't move past an FA
-    if (screen_.at(prev).isFA) return false;
+    if (cur != 0 && !screen_.at(cur).isFA && screen_.at(prev).isFA) return true;
     screen_.setCursor(prev);
-    screen_.at(prev).ch = 0x00;
-    screen_.setMDT(prev);
-    screen_.markDirty();
-    return true;
+    return handleDelete();
 }
 
 bool KeyboardState::handleDelete() {
@@ -227,8 +231,8 @@ bool KeyboardState::handleDelete() {
     // Shift everything left within the field
     int last = lastPosInField(cur);
     for (int pos = cur; pos != last; pos = (pos + 1) % screen_.size())
-        screen_.at(pos).ch = screen_.at((pos + 1) % screen_.size()).ch;
-    screen_.at(last).ch = 0x00;
+        moveCharacter((pos + 1) % screen_.size(), pos);
+    screen_.at(last).ch = 0x00;   // keeps its character attributes, as in x3270
     screen_.setMDT(cur);
     screen_.markDirty();
     return true;

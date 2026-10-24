@@ -229,75 +229,90 @@ void ScreenBuffer::setMDT(int bufferPos) {
     }
 }
 
-// ── Read Modified ─────────────────────────────────────────────────────────────
-std::vector<ScreenBuffer::ModifiedField> ScreenBuffer::getModifiedFields(bool includeProtected) const {
-    std::vector<ModifiedField> result;
-    const int sz = rows_ * cols_;
-    for (int i = 0; i < sz; ++i) {
-        if (!cells_[i].isFA) continue;
-        if (!(cells_[i].attr & FA_MDT)) continue;
-        // IBM GA23-0059: Read Modified returns only unprotected (input) fields.
-        // Protected fields with MDT set are host-placed data, not user input;
-        // sending them causes ISPF screen input error code 23.
-        // Read Modified All (includeProtected=true) returns every MDT field.
-        if (!includeProtected && (cells_[i].attr & FA_PROTECTED)) continue;
-        // Collect data from this FA+1 to next FA
-        ModifiedField mf;
-        mf.startPos = i;
-        mf.attrByte = cells_[i].attr;
-        int pos = clamp(i + 1);
-        while (pos != i && !cells_[pos].isFA) {
-            if (cells_[pos].ch != 0x00) { // strip NUL
-                mf.data.push_back(cells_[pos].ch);
-            }
-            pos = clamp(pos + 1);
-        }
-        result.push_back(std::move(mf));
-    }
-    return result;
+// ── Inbound reply mode ───────────────────────────────────────────────────────
+void ScreenBuffer::setReplyMode(ReplyMode mode, std::vector<uint8_t> attrTypes) {
+    replyMode_      = mode;
+    replyAttrTypes_ = mode == ReplyMode::Character ? std::move(attrTypes) : std::vector<uint8_t>{};
 }
 
-std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool includeProtected,
+void ScreenBuffer::appendCharAttrs(std::vector<uint8_t>& rec, std::vector<uint8_t>* logCopy,
+                                   uint8_t fg, uint8_t bg, uint8_t hl, uint8_t cur[3]) const {
+    if (hl == 0xF0) hl = 0x00;   // "normal" is the same as no highlighting
+    // Same order as x3270: foreground, background, highlighting.
+    const uint8_t types[3]  = { 0x42, 0x45, 0x41 };
+    const uint8_t values[3] = { fg, bg, hl };
+    for (int i = 0; i < 3; ++i) {
+        if (values[i] == cur[i]) continue;
+        if (std::find(replyAttrTypes_.begin(), replyAttrTypes_.end(), types[i]) == replyAttrTypes_.end()) continue;
+        cur[i] = values[i];
+        for (auto* out : { &rec, logCopy }) {
+            if (!out) continue;
+            out->push_back(0x28);    // SA order
+            out->push_back(types[i]);
+            out->push_back(values[i]);
+        }
+    }
+}
+
+// ── Read Modified ─────────────────────────────────────────────────────────────
+std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool all,
                                                            std::vector<uint8_t>* logCopy) const {
     std::vector<uint8_t> rec;
     // AID byte
     rec.push_back(static_cast<uint8_t>(aidByte));
+    // PA keys and Clear are a "short read": the AID byte alone.
+    const bool shortRead = aidByte == 0x6C || aidByte == 0x6E || aidByte == 0x6B || aidByte == 0x6D;
+    if (shortRead && !all) {
+        if (logCopy) *logCopy = rec;
+        return rec;
+    }
     // Cursor address (2 bytes encoded)
     uint8_t cursorAddr[2];
     encodeAddress(cursorPos_, cursorAddr);
     rec.push_back(cursorAddr[0]);
     rec.push_back(cursorAddr[1]);
+    if (logCopy) *logCopy = rec;
+
+    const bool charMode = replyMode_ == ReplyMode::Character;
+    uint8_t cur[3] = {};    // character attributes the host already has
 
     // Unformatted screen (no field attributes at all, e.g. CICS after CLEAR or
     // TSO line mode): send every non-null character in buffer order, no SBAs.
     // (No fields means nothing is hidden.)
     if (findFieldStart(0) < 0) {
         for (const auto& c : cells_) {
-            if (c.ch != 0x00) rec.push_back(c.ch);
+            if (c.ch == 0x00) continue;
+            if (charMode) appendCharAttrs(rec, logCopy, c.fgColor, c.bgColor, c.highlight, cur);
+            rec.push_back(c.ch);
+            if (logCopy) logCopy->push_back(c.ch);
         }
-        if (logCopy) *logCopy = rec;
         return rec;
     }
 
-    // Each modified field: SBA(addr) + data
-    auto fields = getModifiedFields(includeProtected);
-    if (logCopy) *logCopy = rec;
-    // SBA order code
-    static constexpr uint8_t SBA_ORDER = 0x11;
-    for (const auto& mf : fields) {
+    // Every field with its MDT set, protected or not: SBA(first data
+    // position) + its non-null characters.
+    const int sz = rows_ * cols_;
+    for (int i = 0; i < sz; ++i) {
+        const Cell& fa = cells_[i];
+        if (!fa.isFA || !(fa.attr & FA_MDT)) continue;
         uint8_t addr[2];
-        // Data starts at FA+1
-        encodeAddress(clamp(mf.startPos + 1), addr);
-        const bool hidden = (mf.attrByte & 0x0C) == FA_NONDISPLAY;
+        encodeAddress(clamp(i + 1), addr);
         for (auto* out : { &rec, logCopy }) {
             if (!out) continue;
-            out->push_back(SBA_ORDER);
+            out->push_back(0x11);    // SBA order
             out->push_back(addr[0]);
             out->push_back(addr[1]);
         }
-        for (uint8_t b : mf.data) {
-            rec.push_back(b);
-            if (logCopy) logCopy->push_back(hidden ? LOG_MASK_CHAR : b);
+        const bool hidden = fa.isNonDisplay();
+        for (int pos = clamp(i + 1); pos != i && !cells_[pos].isFA; pos = clamp(pos + 1)) {
+            const Cell& c = cells_[pos];
+            if (c.ch == 0x00) continue;
+            // Characters without their own attributes report the field's.
+            if (charMode) appendCharAttrs(rec, logCopy, c.fgColor ? c.fgColor : fa.fgColor,
+                                          c.bgColor ? c.bgColor : fa.bgColor,
+                                          c.highlight ? c.highlight : fa.highlight, cur);
+            rec.push_back(c.ch);
+            if (logCopy) logCopy->push_back(hidden ? LOG_MASK_CHAR : c.ch);
         }
     }
     return rec;
@@ -312,15 +327,30 @@ std::vector<uint8_t> ScreenBuffer::buildReadBufferRecord(int aidByte, std::vecto
     rec.push_back(cursorAddr[0]);
     rec.push_back(cursorAddr[1]);
     if (logCopy) *logCopy = rec;
+    const bool extended = replyMode_ != ReplyMode::Field;
+    const bool charMode = replyMode_ == ReplyMode::Character;
+    uint8_t cur[3] = {};    // character attributes the host already has
+    auto put = [&](uint8_t b) { rec.push_back(b); if (logCopy) logCopy->push_back(b); };
     int  fa     = findFieldStart(0);
     bool hidden = fa >= 0 && cells_[fa].isNonDisplay();
     for (const auto& c : cells_) {
         if (c.isFA) {
             hidden = c.isNonDisplay();
-            rec.push_back(0x1D);                      // SF order
-            rec.push_back(kCodeTable[c.attr & 0x3F]); // attribute in graphic form
-            if (logCopy) { logCopy->push_back(rec[rec.size() - 2]); logCopy->push_back(rec.back()); }
+            const uint8_t attr = kCodeTable[c.attr & 0x3F];   // attribute in graphic form
+            if (!extended) {
+                put(0x1D);                                    // SF order
+                put(attr);
+                continue;
+            }
+            const uint8_t hl = c.highlight == 0xF0 ? 0x00 : c.highlight;
+            put(0x29);                                        // SFE order
+            put(static_cast<uint8_t>(1 + (c.fgColor != 0) + (c.bgColor != 0) + (hl != 0)));
+            put(0xC0); put(attr);
+            if (c.fgColor) { put(0x42); put(c.fgColor); }
+            if (c.bgColor) { put(0x45); put(c.bgColor); }
+            if (hl)        { put(0x41); put(hl); }
         } else {
+            if (charMode) appendCharAttrs(rec, logCopy, c.fgColor, c.bgColor, c.highlight, cur);
             rec.push_back(c.ch);
             if (logCopy) logCopy->push_back(hidden && c.ch ? LOG_MASK_CHAR : c.ch);
         }

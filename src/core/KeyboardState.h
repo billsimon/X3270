@@ -82,8 +82,7 @@ public:
     bool handleReset();
 
 private:
-    void sendAID(uint8_t aidCode, bool includeModifiedFields);
-    void sendPAKey(uint8_t aidCode);
+    void sendAID(uint8_t aidCode);
     int  nextUnprotected(int from) const;
     void moveCursorToFirstUnprotected();
     void advanceToNextField(bool forward);
@@ -99,6 +98,8 @@ private:
     // Last character position of the field holding `pos` (the end of the
     // screen when it is unformatted)
     int lastPosInField(int pos) const;
+    // Copy a character and its character attributes (insert/delete shifts)
+    void moveCharacter(int from, int to);
     // Insert char at cursor position in current field (handles insert mode)
     bool insertCharAtCursor(uint8_t ebcdic);
 

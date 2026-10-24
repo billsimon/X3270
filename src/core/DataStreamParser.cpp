@@ -178,25 +178,26 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
         break;
     case CMD_READ_BUFFER:
     case CMD_READ_BUFFER_SNA:
-        if (sendCb_) { std::vector<uint8_t> log; auto rec = screen_.buildReadBufferRecord(0x60 /*no-AID*/, &log); sendCb_(rec, log); }
+        if (sendCb_) { std::vector<uint8_t> log; auto rec = screen_.buildReadBufferRecord(screen_.aid(), &log); sendCb_(rec, log); }
         state_ = ParseState::SkipRecord;
         break;
     case CMD_READ_MODIFIED:
     case CMD_READ_MODIFIED_SNA:
-        // Host-solicited Read Modified: unprotected MDT fields only.
+        // Host-solicited reads carry the AID of the last operator action
+        // (a short read if that was PA or Clear).
         if (sendCb_) {
             std::vector<uint8_t> log;
-            auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/, false, &log);
+            auto data = screen_.buildReadModifiedRecord(screen_.aid(), false, &log);
             sendCb_(data, log);
         }
         state_ = ParseState::SkipRecord;
         break;
     case CMD_READ_MODIFIED_ALL:
     case CMD_READ_MODIFIED_ALL_SNA:
-        // Host-solicited Read Modified All: ALL MDT fields including protected.
+        // Read Modified All: as Read Modified, but never a short read.
         if (sendCb_) {
             std::vector<uint8_t> log;
-            auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/, true, &log);
+            auto data = screen_.buildReadModifiedRecord(screen_.aid(), true, &log);
             sendCb_(data, log);
         }
         state_ = ParseState::SkipRecord;
@@ -225,6 +226,7 @@ void DataStreamParser::doWrite(bool eraseFirst, bool alternate) {
     screen_.setBufferAddress(screen_.cursorPos());
     lastWasOrder_ = true;
     lastZpt_      = false;
+    eraseWrite_   = eraseFirst;
     state_ = ParseState::WCC;
 }
 
@@ -234,14 +236,17 @@ void DataStreamParser::doEraseAllUnprotected() {
     screen_.eraseAllUnprotected();
     screen_.setCursor(0);
     screen_.setCursorToHome();
+    screen_.setAid(AID_NONE);
     if (unlockCb_) unlockCb_();
 }
 
 // ── Write Control Character ───────────────────────────────────────────────────
 void DataStreamParser::handleWCC(uint8_t wcc) {
+    // Reset on an Erase/Write returns inbound replies to field mode.
+    if ((wcc & WCC_RESET) && eraseWrite_) screen_.setReplyMode(ScreenBuffer::ReplyMode::Field);
     if (wcc & WCC_RESET_MDT) screen_.resetAllMDT();
     if (wcc & WCC_ALARM)     { if (alarmCb_) alarmCb_(); }
-    if (wcc & WCC_UNLOCK)    { if (unlockCb_) unlockCb_(); }
+    if (wcc & WCC_UNLOCK)    { screen_.setAid(AID_NONE); if (unlockCb_) unlockCb_(); }
     state_ = ParseState::Data;
 }
 
@@ -346,7 +351,8 @@ void DataStreamParser::handleWSF(const std::vector<uint8_t>& record) {
     while (i + 2 < record.size()) {
         // Each SF: [length_hi][length_lo][type][data...]
         // Length field includes itself (min 3 bytes).
-        uint16_t sfLen = (static_cast<uint16_t>(record[i]) << 8) | record[i + 1];
+        size_t sfLen = (static_cast<size_t>(record[i]) << 8) | record[i + 1];
+        if (sfLen == 0) sfLen = record.size() - i;   // length 0: to the end of the record
         if (sfLen < 3 || i + sfLen > record.size()) break;
 
         uint8_t sfType = record[i + 2];
@@ -361,20 +367,22 @@ void DataStreamParser::handleWSF(const std::vector<uint8_t>& record) {
             // ── Read Partition ────────────────────────────────────────────────
             if (sfLen >= 5 && sendCb_) {
                 uint8_t readType = record[i + 4]; // [partition_id][type]
+                // Reads of the partition reply with the Read Partition AID.
+                constexpr uint8_t AID_READ_PARTITION = 0x61;
                 std::vector<uint8_t> rec, log;
                 switch (readType) {
                 case 0x02: // Query
                 case 0x03: // Query List (we always reply with everything)
                     rec = log = buildQueryReply();
                     break;
-                case 0xF1: // Read Buffer
-                    rec = screen_.buildReadBufferRecord(0x60, &log);
+                case 0xF2: // Read Buffer
+                    rec = screen_.buildReadBufferRecord(AID_READ_PARTITION, &log);
                     break;
                 case 0xF6: // Read Modified
-                    rec = screen_.buildReadModifiedRecord(0x60, false, &log);
+                    rec = screen_.buildReadModifiedRecord(AID_READ_PARTITION, false, &log);
                     break;
                 case 0x6E: // Read Modified All
-                    rec = screen_.buildReadModifiedRecord(0x60, true, &log);
+                    rec = screen_.buildReadModifiedRecord(AID_READ_PARTITION, true, &log);
                     break;
                 default:
                     break;
@@ -388,6 +396,14 @@ void DataStreamParser::handleWSF(const std::vector<uint8_t>& record) {
             if (payloadSize >= 1) {
                 screen_.setAlternateSize((payload[0] & 0x80) != 0);
                 screen_.resetCharAttributes();
+            }
+            break;
+
+        case 0x09:
+            // ── Set Reply Mode: [partition][mode][attribute types...] ─────────
+            if (payloadSize >= 2 && payload[0] == 0x00 && payload[1] <= 0x02) {
+                screen_.setReplyMode(static_cast<ScreenBuffer::ReplyMode>(payload[1]),
+                                     std::vector<uint8_t>(payload + 2, payload + payloadSize));
             }
             break;
 
@@ -472,7 +488,7 @@ std::vector<uint8_t> DataStreamParser::buildQueryReply() const {
 
     // ── Summary (0x80): every QR in this reply, including itself ────────────
     qr(0x80, [&] {
-        for (uint8_t q : { 0x80, 0x81, 0x86, 0x87, 0xA6 }) r.push_back(q);
+        for (uint8_t q : { 0x80, 0x81, 0x86, 0x87, 0x88, 0xA6 }) r.push_back(q);
     });
 
     // ── Usable Area (0x81) ───────────────────────────────────────────────────
@@ -505,6 +521,11 @@ std::vector<uint8_t> DataStreamParser::buildQueryReply() const {
         r.push_back(0xF2); r.push_back(0xF2); // reverse
         r.push_back(0xF4); r.push_back(0xF4); // underscore
         r.push_back(0xF8); r.push_back(0xF8); // intensify
+    });
+
+    // ── Reply Modes (0x88): field, extended field and character ─────────────
+    qr(0x88, [&] {
+        for (uint8_t m : { 0x00, 0x01, 0x02 }) r.push_back(m);
     });
 
     // ── Implicit Partition (0xA6): default and alternate screen sizes ───────

@@ -19,6 +19,9 @@ static constexpr uint8_t FA_INTENSIFIED = 0x08;  // bits[3:2]=10 → intensified
 static constexpr uint8_t FA_NONDISPLAY  = 0x0C;  // bits[3:2]=11 → non-display (hidden)
 static constexpr uint8_t FA_MDT        = 0x01;
 
+// AID byte meaning "no AID" (no operator action since the last restore)
+static constexpr uint8_t AID_NONE = 0x60;
+
 // Byte that stands in for hidden-field data in the copies of outbound records
 // written to the traffic log (EBCDIC '*', the same in every supported code page).
 static constexpr uint8_t LOG_MASK_CHAR = 0x5C;
@@ -132,25 +135,32 @@ public:
     /// buffer pointer (0xC0 = basic attribute, 0x41 highlight, 0x42/0x45 colour).
     void modifyFieldAttribute(uint8_t type, uint8_t value);
 
-    // ── Read Modified (build client→host AID data) ────────────────────────────
-    struct ModifiedField {
-        int              startPos;
-        uint8_t          attrByte;
-        std::vector<uint8_t> data; // EBCDIC bytes (NUL stripped)
-    };
-    /// includeProtected=false for Read Modified (user AID keys / solicited poll),
-    /// includeProtected=true  for Read Modified All (host solicited — returns every MDT field).
-    std::vector<ModifiedField> getModifiedFields(bool includeProtected = false) const;
+    // ── Inbound reply mode (Set Reply Mode structured field) ─────────────────
+    enum class ReplyMode : uint8_t { Field = 0x00, ExtendedField = 0x01, Character = 0x02 };
+    /// attrTypes: in Character mode, the attribute types (0x41 highlight,
+    /// 0x42 foreground, 0x45 background) reported with SA orders.
+    void setReplyMode(ReplyMode mode, std::vector<uint8_t> attrTypes = {});
+    ReplyMode replyMode() const { return replyMode_; }
 
-    /// Build Read Modified data: SBA(cursor) + {SBA(field)+data} for each MDT field.
-    /// Pass includeProtected=true only for Read Modified All.
+    // ── AID of the last operator action ───────────────────────────────────────
+    /// Host-initiated reads report it; a keyboard-restoring Write resets it
+    /// to AID_NONE.
+    uint8_t aid() const      { return aid_; }
+    void    setAid(uint8_t a) { aid_ = a; }
+
+    // ── Read Modified (build client→host AID data) ────────────────────────────
+    /// Build Read Modified data: AID + cursor + {SBA(field)+data} for every
+    /// field with its MDT set.  For a PA or Clear AID this is a short read
+    /// (the AID alone) unless `all` (Read Modified All) is set.
     /// If logCopy is given it receives the same record with the data of
     /// non-display (password) fields replaced by LOG_MASK_CHAR, for logging.
-    std::vector<uint8_t> buildReadModifiedRecord(int aidByte, bool includeProtected = false,
+    std::vector<uint8_t> buildReadModifiedRecord(int aidByte, bool all = false,
                                                  std::vector<uint8_t>* logCopy = nullptr) const;
 
     /// Build a Read Buffer reply: AID + cursor + every buffer position in
-    /// order, with each field attribute sent as SF + attribute byte.
+    /// order.  Field attributes are sent as SF, or as SFE with their colour
+    /// and highlighting outside Field reply mode; Character reply mode adds
+    /// SA orders for character attributes.
     /// logCopy: as for buildReadModifiedRecord.
     std::vector<uint8_t> buildReadBufferRecord(int aidByte,
                                                std::vector<uint8_t>* logCopy = nullptr) const;
@@ -206,7 +216,16 @@ private:
     uint8_t currentFgColor_   { 0x00 };  // active SA character fg colour
     uint8_t currentBgColor_   { 0x00 };  // active SA character bg colour
     uint8_t currentHighlight_ { 0x00 };  // active SA highlight (reverse/underscore/blink)
+    ReplyMode replyMode_      { ReplyMode::Field };
+    std::vector<uint8_t> replyAttrTypes_; // Character mode: types reported with SA
+    uint8_t aid_              { AID_NONE };
     std::vector<Cell> savedErrorLine_;   // see saveErrorLine()
+
+    // Character reply mode: append SA orders for the listed attribute types
+    // whose value differs from what the host already has (`cur`: fg, bg,
+    // highlight, starting at 0 for each record).
+    void appendCharAttrs(std::vector<uint8_t>& rec, std::vector<uint8_t>* logCopy,
+                         uint8_t fg, uint8_t bg, uint8_t hl, uint8_t cur[3]) const;
 
     // Buffer address code table (64 entries, 6-bit index → 8-bit wire byte)
     static const uint8_t kCodeTable[64];

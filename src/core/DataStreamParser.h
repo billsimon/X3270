@@ -133,6 +133,7 @@ private:
     // track the previous item in the Write (as x3270's last_cmd / last_zpt).
     bool         lastWasOrder_ { true };
     bool         lastZpt_      { false };
+    bool         eraseWrite_   { false }; // the current Write erased the screen
 
     AlarmCallback           alarmCb_;
     UnlockCallback          unlockCb_;
