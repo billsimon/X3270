@@ -71,6 +71,7 @@ public:
     bool handleBackspace();
     bool handleDelete();
     bool handleHome();
+    bool handleFieldEnd();                // cursor after the last character in the field
     bool handleEraseEOF();
     bool handleEraseInput();
     bool handleNewLine();
@@ -89,6 +90,15 @@ private:
     // Returns the field attribute governing cursorPos, or 0 if unformatted
     uint8_t currentFieldAttr() const;
     bool isCurrentFieldEditable() const;
+    // Cursor-movement keys clear an operator error (as x3270 does) and are
+    // otherwise refused while input is inhibited.
+    bool readyToMoveCursor();
+    // True if the cursor is on a character position of an input field;
+    // otherwise locks the keyboard with OErr, as a 3270 does.
+    bool requireEditableCursor();
+    // Last character position of the field holding `pos` (the end of the
+    // screen when it is unformatted)
+    int lastPosInField(int pos) const;
     // Insert char at cursor position in current field (handles insert mode)
     bool insertCharAtCursor(uint8_t ebcdic);
 

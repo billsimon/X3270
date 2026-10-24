@@ -338,8 +338,8 @@ int ScreenBuffer::decodeAddress(uint8_t b0, uint8_t b1) {
     return ((b0 & 0x3F) << 6) | (b1 & 0x3F);
 }
 
-void ScreenBuffer::encodeAddress(int offset, uint8_t out[2]) {
-    if (offset > 4095) {
+void ScreenBuffer::encodeAddress(int offset, uint8_t out[2]) const {
+    if (size() > 4096) {
         // 14-bit binary encoding (top 2 bits = 00) for large screens
         out[0] = static_cast<uint8_t>((offset >> 8) & 0x3F);
         out[1] = static_cast<uint8_t>(offset & 0xFF);

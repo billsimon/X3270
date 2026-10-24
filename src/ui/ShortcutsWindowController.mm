@@ -84,14 +84,17 @@
     ROW(@"Option + 3",         @"PA3");
 
     SECTION(@"Session Control");
-    ROW(@"Return",             @"Enter — send AID to host");
-    ROW(@"Escape",             @"Reset — unlock keyboard after host error");
+    ROW(@"Return / Enter",     @"Enter — send AID (Enter = keypad Enter or fn + Return)");
+    ROW(@"Shift + Return",     @"New Line — first input field on the next line");
+    ROW(@"Escape",             @"Reset — unlock keyboard after an error");
     ROW(@"Option + Escape",    @"Clear — send Clear AID (clears host screen)");
     ROW(@"Option + E",         @"Erase Input — clear all unprotected fields");
 
     SECTION(@"Navigation & Editing");
-    ROW(@"Tab",                @"Move cursor to next input field");
-    ROW(@"Alt + Tab",          @"Move cursor to previous input field");
+    ROW(@"Tab",                @"Next input field");
+    ROW(@"Shift + Tab",        @"Previous input field (also Option + Tab)");
+    ROW(@"End",                @"Field End — after the field's last character");
+    ROW(@"Page Up / Page Down", @"PF7 / PF8 (scroll up / down)");
     ROW(@"↑  ↓  ←  →",        @"Move cursor within the current field or screen");
     ROW(@"Insert / Help / ⌘ I", @"Toggle insert mode (characters shift right)");
     ROW(@"Option + Delete",    @"Erase to End of Field — clears from cursor to end");

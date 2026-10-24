@@ -754,8 +754,9 @@ static BOOL isTypedCharacter(NSEvent *event) {
         else if (key == '\r' || key == '\n') {
             handled = _kbd5250->handleEnter();
         }
-        else if (key == '\t') {
-            handled = _kbd5250->handleTab(altDown);  // Alt+Tab = BackTab
+        // Shift+Tab arrives as NSBackTabCharacter; Option+Tab also backtabs.
+        else if (key == '\t' || key == NSBackTabCharacter) {
+            handled = _kbd5250->handleTab(altDown || key == NSBackTabCharacter);
         }
         // Escape keys follow IBM Access Client Solutions: Esc = Attention,
         // Shift+Esc = SysReq; Option+Esc = Reset (clears an error message).
@@ -829,14 +830,18 @@ static BOOL isTypedCharacter(NSEvent *event) {
     else if (key == 27 && altDown) {
         handled = _kbd->handleClear();
     }
-    // Enter
+    // Enter: Return or the keypad Enter key (fn+Return on laptops);
+    // Shift+Return = NewLine
+    else if (key == NSEnterCharacter) {
+        handled = _kbd->handleEnter();
+    }
     else if (key == '\r' || key == '\n') {
         if (shiftDown) handled = _kbd->handleNewLine();
         else           handled = _kbd->handleEnter();
     }
-    // Tab / BackTab (Alt+Tab = previous field; Shift+Tab is consumed by NSWindow)
-    else if (key == '\t') {
-        handled = _kbd->handleTab(altDown);
+    // Tab / BackTab: Shift+Tab arrives as NSBackTabCharacter; Option+Tab also backtabs
+    else if (key == '\t' || key == NSBackTabCharacter) {
+        handled = _kbd->handleTab(altDown || key == NSBackTabCharacter);
     }
     // ErEOF: Option+Delete (the Mac Delete key, or fn+Delete forward delete).
     // Must precede the plain Backspace/Delete branches, which would claim it.
@@ -855,6 +860,17 @@ static BOOL isTypedCharacter(NSEvent *event) {
     // Home
     else if (key == NSHomeFunctionKey) {
         handled = _kbd->handleHome();
+    }
+    // End (fn+Right on laptops): FieldEnd
+    else if (key == NSEndFunctionKey) {
+        handled = _kbd->handleFieldEnd();
+    }
+    // Page Up / Page Down = PF7 / PF8 (ISPF scroll keys, as in wc3270)
+    else if (key == NSPageUpFunctionKey) {
+        handled = _kbd->handlePF(7);
+    }
+    else if (key == NSPageDownFunctionKey) {
+        handled = _kbd->handlePF(8);
     }
     // Arrow keys
     else if (key == NSUpArrowFunctionKey)    { handled = _kbd->handleCursorUp(); }
@@ -879,11 +895,10 @@ static BOOL isTypedCharacter(NSEvent *event) {
 
     if (handled) {
         [self setNeedsDisplay:YES];
-    } else if (!handled) {
-        // Play system beep on OErr
-        if (_kbd && _kbd->lockReason() == x3270::KeyboardState::LockReason::OErr) {
-            NSBeep();
-        }
+    } else if (_kbd->lockReason() == x3270::KeyboardState::LockReason::OErr) {
+        // Show the OErr indicator and beep
+        [self setNeedsDisplay:YES];
+        NSBeep();
     }
 }
 

@@ -35,6 +35,20 @@ bool KeyboardState::isCurrentFieldEditable() const {
     return !prot && !skip;
 }
 
+bool KeyboardState::requireEditableCursor() {
+    // An attribute position is protected even when it starts an input field.
+    if (screen_.at(screen_.cursorPos()).isFA || !isCurrentFieldEditable()) {
+        lock(LockReason::OErr);
+        return false;
+    }
+    return true;
+}
+
+bool KeyboardState::readyToMoveCursor() {
+    if (lockReason_ == LockReason::OErr) lockReason_ = LockReason::None;
+    return !isLocked();
+}
+
 // First character of the next unprotected field after `from` (exclusive of
 // fields with no character positions), or -1 if there is none.
 int KeyboardState::nextUnprotected(int from) const {
@@ -71,21 +85,23 @@ void KeyboardState::advanceToNextField(bool forward) {
     }
 }
 
+int KeyboardState::lastPosInField(int pos) const {
+    const int sz = screen_.size();
+    for (int i = 1; i < sz; ++i) {
+        int p = (pos + i) % sz;
+        if (screen_.at(p).isFA) return (p - 1 + sz) % sz;
+    }
+    // No other attribute: `pos` is the only FA (its field wraps round to
+    // it), or the screen is unformatted and ends at the last position.
+    return screen_.at(pos).isFA ? (pos - 1 + sz) % sz : sz - 1;
+}
+
 bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
     int cur = screen_.cursorPos();
-    const Cell& cell = screen_.at(cur);
-    if (cell.isFA) return false; // cursor is on FA position — skip
-
     if (insertMode_) {
-        // Find end of field (position of next FA, exclusive)
-        int fieldEnd = (cur + 1) % screen_.size();
-        for (int i = 0; i < screen_.size(); ++i) {
-            if (screen_.at(fieldEnd).isFA) break;
-            fieldEnd = (fieldEnd + 1) % screen_.size();
-        }
         // If the last character in the field is non-null the field is full —
         // lock with OErr (same behaviour as a real 3270 in insert mode).
-        int lastCell = (fieldEnd - 1 + screen_.size()) % screen_.size();
+        int lastCell = lastPosInField(cur);
         if (lastCell != cur && screen_.at(lastCell).ch != 0x00) {
             lock(LockReason::OErr);
             return false;
@@ -150,15 +166,12 @@ bool KeyboardState::handleEbcdicChar(uint8_t ebcdic) {
             lock(LockReason::OErr);
         return false;
     }
-    if (!isCurrentFieldEditable()) {
-        lock(LockReason::OErr);
-        return false;
-    }
+    if (!requireEditableCursor()) return false;
     return insertCharAtCursor(ebcdic);
 }
 
 bool KeyboardState::handleTab(bool backward) {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     advanceToNextField(!backward);
     return true;
 }
@@ -195,7 +208,7 @@ bool KeyboardState::handlePA(int n) {
 
 bool KeyboardState::handleBackspace() {
     if (isLocked()) return false;
-    if (!isCurrentFieldEditable()) return false;
+    if (!requireEditableCursor()) return false;
     int cur = screen_.cursorPos();
     int prev = (cur - 1 + screen_.size()) % screen_.size();
     // Don't move past an FA
@@ -209,39 +222,54 @@ bool KeyboardState::handleBackspace() {
 
 bool KeyboardState::handleDelete() {
     if (isLocked()) return false;
-    if (!isCurrentFieldEditable()) return false;
+    if (!requireEditableCursor()) return false;
     int cur = screen_.cursorPos();
     // Shift everything left within the field
-    int pos = cur;
-    while (true) {
-        int next = (pos + 1) % screen_.size();
-        if (screen_.at(next).isFA) {
-            screen_.at(pos).ch = 0x00;
-            break;
-        }
-        screen_.at(pos).ch = screen_.at(next).ch;
-        pos = next;
-    }
+    int last = lastPosInField(cur);
+    for (int pos = cur; pos != last; pos = (pos + 1) % screen_.size())
+        screen_.at(pos).ch = screen_.at((pos + 1) % screen_.size()).ch;
+    screen_.at(last).ch = 0x00;
     screen_.setMDT(cur);
     screen_.markDirty();
     return true;
 }
 
 bool KeyboardState::handleHome() {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     moveCursorToFirstUnprotected();
+    return true;
+}
+
+bool KeyboardState::handleFieldEnd() {
+    if (!readyToMoveCursor()) return false;
+    int cur = screen_.cursorPos();
+    if (screen_.at(cur).isFA) return true;
+    int fa = screen_.findFieldStart(cur);
+    // Does nothing on an unformatted screen, an attribute or a protected field.
+    if (fa < 0 || screen_.at(fa).isProtected()) return true;
+    const int sz  = screen_.size();
+    const int end = lastPosInField(cur);
+    int last = -1;
+    for (int pos = (fa + 1) % sz; ; pos = (pos + 1) % sz) {
+        uint8_t ch = screen_.at(pos).ch;
+        if (ch != 0x00 && ch != 0x40) last = pos;
+        if (pos == end) break;
+    }
+    int target = last < 0 ? (fa + 1) % sz
+               : last == end ? last                  // field is full
+               : (last + 1) % sz;
+    screen_.setCursor(target);
     return true;
 }
 
 bool KeyboardState::handleEraseEOF() {
     if (isLocked()) return false;
-    if (!isCurrentFieldEditable()) return false;
-    int cur = screen_.cursorPos();
-    int pos = cur;
-    while (!screen_.at(pos).isFA) {
+    if (!requireEditableCursor()) return false;
+    int cur  = screen_.cursorPos();
+    int last = lastPosInField(cur);
+    for (int pos = cur; ; pos = (pos + 1) % screen_.size()) {
         screen_.at(pos).ch = 0x00;
-        pos = (pos + 1) % screen_.size();
-        if (pos == cur) break; // wrapped all the way around
+        if (pos == last) break;
     }
     screen_.setMDT(cur);
     screen_.markDirty();
@@ -256,7 +284,7 @@ bool KeyboardState::handleEraseInput() {
 }
 
 bool KeyboardState::handleNewLine() {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     // Move to the start of the next line if that is an input position,
     // otherwise to the first input position after it.
     int curRow = screen_.cursorPos() / screen_.cols();
@@ -272,27 +300,27 @@ bool KeyboardState::handleNewLine() {
 }
 
 bool KeyboardState::handleCursorUp() {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     int pos = screen_.cursorPos();
     screen_.setCursor((pos - screen_.cols() + screen_.size()) % screen_.size());
     return true;
 }
 
 bool KeyboardState::handleCursorDown() {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     int pos = screen_.cursorPos();
     screen_.setCursor((pos + screen_.cols()) % screen_.size());
     return true;
 }
 
 bool KeyboardState::handleCursorLeft() {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     screen_.setCursor((screen_.cursorPos() - 1 + screen_.size()) % screen_.size());
     return true;
 }
 
 bool KeyboardState::handleCursorRight() {
-    if (isLocked()) return false;
+    if (!readyToMoveCursor()) return false;
     screen_.setCursor((screen_.cursorPos() + 1) % screen_.size());
     return true;
 }

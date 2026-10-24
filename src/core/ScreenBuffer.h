@@ -175,7 +175,9 @@ public:
 
     // ── 3270 Buffer Address encoding/decoding ────────────────────────────────
     static int  decodeAddress(uint8_t b0, uint8_t b1);
-    static void encodeAddress(int offset, uint8_t out[2]);
+    /// Uses 14-bit addressing for every address once the current screen
+    /// exceeds 4096 positions, as x3270 does; 12-bit otherwise.
+    void encodeAddress(int offset, uint8_t out[2]) const;
 
     // ── Dirty tracking (for UI redraws) ──────────────────────────────────────
     bool isDirty() const  { return dirty_; }
