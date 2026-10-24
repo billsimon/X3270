@@ -361,11 +361,14 @@
     [_terminals addObject:twc];
     [twc showWindow:nil];
 
-    // Observe connection result
+    // Observe connection result.  `settled` (main queue only) records that
+    // the connection succeeded or failed and this dialog has been updated.
     __weak typeof(self) weakSelf = self;
     __weak typeof(twc)  weakTwc  = twc;
+    __block BOOL settled = NO;
     twc.onConnectError = ^(NSString *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            settled = YES;
             __strong typeof(weakSelf) s = weakSelf;
             if (s) {
                 s.statusLabel.stringValue = error ?: @"Connection failed.";
@@ -376,6 +379,7 @@
     };
     twc.onConnected = ^{
         dispatch_async(dispatch_get_main_queue(), ^{
+            settled = YES;
             __strong typeof(weakSelf) s = weakSelf;
             if (s) {
                 s.statusLabel.stringValue = @"";
@@ -388,6 +392,13 @@
             __strong typeof(weakSelf) s = weakSelf;
             __strong typeof(weakTwc)  t = weakTwc;
             if (s && t) [s.terminals removeObject:t];
+            // Closed while still connecting: no result will arrive (the
+            // window suppresses its error), so make Connect usable again.
+            if (s && !settled) {
+                settled = YES;
+                s.statusLabel.stringValue = @"";
+                s.connectButton.enabled = YES;
+            }
         });
     };
 }

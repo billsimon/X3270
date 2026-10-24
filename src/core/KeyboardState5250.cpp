@@ -1,4 +1,5 @@
 #include "KeyboardState5250.h"
+#include "Paste.h"
 #include "DataStream5250Parser.h"   // FFW bit definitions
 #include <algorithm>
 
@@ -119,7 +120,7 @@ static uint8_t toUpperEbcdic(uint8_t e) {
     return e;
 }
 
-bool KeyboardState5250::insertCharAtCursor(uint8_t ebcdic) {
+bool KeyboardState5250::insertCharAtCursor(uint8_t ebcdic, bool autoSkip) {
     const int sz = screen_.size();
     int cur = screen_.cursorPos();
     const Cell& cell = screen_.at(cur);
@@ -175,7 +176,9 @@ bool KeyboardState5250::insertCharAtCursor(uint8_t ebcdic) {
     // stays put.  Auto-enter fields send Enter once filled.
     int next = (cur + 1) % sz;
     bool filled = faPos >= 0 && (lastPosInField || screen_.at(next).isFA);
-    if (filled && (ffw2 & FFW2_FER)) {
+    if (!autoSkip) {
+        screen_.setCursor(next);
+    } else if (filled && (ffw2 & FFW2_FER)) {
         ferPos_ = cur;
     } else if (filled) {
         advanceToNextField(true);
@@ -470,6 +473,22 @@ bool KeyboardState5250::handleInsert() {
     if (isLocked()) return false;
     toggleInsert();
     return true;
+}
+
+// ── Paste ─────────────────────────────────────────────────────────────────────
+size_t KeyboardState5250::paste(const std::u32string& text) {
+    PasteOps ops;
+    ops.locked      = [this] { return isLocked(); };
+    ops.overlayChar = [this](uint8_t e) {
+        int cur = screen_.cursorPos();
+        if (inputFieldAt(cur) < 0)
+            screen_.setCursor(cur + 1);              // not an input position: dropped
+        else
+            insertCharAtCursor(e, false);
+    };
+    ops.tab        = [this] { handleTab(false); };
+    ops.cursorLeft = [this] { handleArrow(0, -1); };
+    return pasteText(screen_, codec_, text, ops);
 }
 
 } // namespace x3270

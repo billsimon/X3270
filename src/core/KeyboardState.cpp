@@ -1,4 +1,5 @@
 #include "KeyboardState.h"
+#include "Paste.h"
 #include <algorithm>
 
 namespace x3270 {
@@ -94,7 +95,7 @@ int KeyboardState::lastPosInField(int pos) const {
     return screen_.at(pos).isFA ? (pos - 1 + sz) % sz : sz - 1;
 }
 
-bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
+bool KeyboardState::insertCharAtCursor(uint8_t ebcdic, bool autoSkip) {
     int cur = screen_.cursorPos();
     if (insertMode_) {
         // If the last character in the field is non-null the field is full —
@@ -125,7 +126,9 @@ bool KeyboardState::insertCharAtCursor(uint8_t ebcdic) {
     // past the next attribute byte; if that field is autoskip (protected +
     // numeric) it tabs on to the next unprotected field.
     int next = (cur + 1) % screen_.size();
-    if (screen_.at(next).isFA && screen_.at(next).isSkip()) {
+    if (!autoSkip) {
+        screen_.setCursor(next);
+    } else if (screen_.at(next).isFA && screen_.at(next).isSkip()) {
         screen_.setCursor(next);
         advanceToNextField(true);
     } else {
@@ -324,6 +327,23 @@ bool KeyboardState::handleReset() {
     }
     insertMode_ = false;
     return true;
+}
+
+// ── Paste ─────────────────────────────────────────────────────────────────────
+size_t KeyboardState::paste(const std::u32string& text) {
+    PasteOps ops;
+    ops.locked      = [this] { return isLocked(); };
+    ops.overlayChar = [this](uint8_t e) {
+        int cur = screen_.cursorPos();
+        int fa  = screen_.findFieldStart(cur);
+        if (fa == cur || (fa >= 0 && screen_.at(fa).isProtected()))
+            screen_.setCursor(cur + 1);              // protected: dropped
+        else
+            insertCharAtCursor(e, false);
+    };
+    ops.tab        = [this] { handleTab(false); };
+    ops.cursorLeft = [this] { handleCursorLeft(); };
+    return pasteText(screen_, codec_, text, ops);
 }
 
 } // namespace x3270
