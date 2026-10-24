@@ -190,9 +190,10 @@ void KeyboardState5250::sendAID(uint8_t aidCode, bool includeModifiedFields) {
 
 // ── Key handlers ──────────────────────────────────────────────────────────────
 
-bool KeyboardState5250::handleChar(uint8_t asciiChar) {
-    uint8_t ebcdic = codec_.fromAscii(asciiChar);
-    return handleEbcdicChar(ebcdic);
+bool KeyboardState5250::handleChar(uint32_t unicodeChar) {
+    int ebcdic = codec_.fromUnicode(unicodeChar);
+    if (ebcdic < 0) return false;   // not in this code page
+    return handleEbcdicChar(static_cast<uint8_t>(ebcdic));
 }
 
 bool KeyboardState5250::handleEbcdicChar(uint8_t ebcdic) {

@@ -80,7 +80,7 @@ public:
     void toggleInsert()       { insertMode_ = !insertMode_; }
 
     // ── Key handlers ──────────────────────────────────────────────────────────
-    bool handleChar(uint8_t asciiChar);
+    bool handleChar(uint32_t unicodeChar);  // typed character (any code page graphic)
     bool handleEbcdicChar(uint8_t ebcdic); // raw EBCDIC input (used for pasting)
     bool handleTab(bool backward = false);
     bool handleEnter();

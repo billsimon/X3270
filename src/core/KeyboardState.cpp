@@ -35,15 +35,22 @@ bool KeyboardState::isCurrentFieldEditable() const {
     return !prot && !skip;
 }
 
-void KeyboardState::moveCursorToFirstUnprotected() {
-    for (int i = 0; i < screen_.size(); ++i) {
-        const Cell& c = screen_.at(i);
-        if (c.isFA && !c.isProtected()) {
-            screen_.setCursor((i + 1) % screen_.size());
-            return;
-        }
+// First character of the next unprotected field after `from` (exclusive of
+// fields with no character positions), or -1 if there is none.
+int KeyboardState::nextUnprotected(int from) const {
+    const int sz = screen_.size();
+    for (int i = 0; i < sz; ++i) {
+        int pos  = (from + i) % sz;
+        int next = (pos + 1) % sz;
+        const Cell& c = screen_.at(pos);
+        if (c.isFA && !c.isProtected() && !screen_.at(next).isFA) return next;
     }
-    screen_.setCursor(0);
+    return -1;
+}
+
+void KeyboardState::moveCursorToFirstUnprotected() {
+    int pos = nextUnprotected(0);
+    screen_.setCursor(pos >= 0 ? pos : 0);
 }
 
 void KeyboardState::advanceToNextField(bool forward) {
@@ -52,7 +59,7 @@ void KeyboardState::advanceToNextField(bool forward) {
     for (int i = 1; i <= screen_.size(); ++i) {
         int pos = (cur + delta * i + screen_.size() * 2) % screen_.size();
         const Cell& c = screen_.at(pos);
-        if (c.isFA && !c.isProtected()) {
+        if (c.isFA && !c.isProtected() && !screen_.at((pos + 1) % screen_.size()).isFA) {
             int target = (pos + 1) % screen_.size();
             // BackTab: if we are already at the first character of this
             // field (target == cur), this is the *current* field's FA --
@@ -128,9 +135,10 @@ void KeyboardState::sendPAKey(uint8_t aidCode) {
 }
 
 // ── Key handlers ──────────────────────────────────────────────────────────────
-bool KeyboardState::handleChar(uint8_t asciiChar) {
-    uint8_t ebcdic = codec_.fromAscii(asciiChar);
-    return handleEbcdicChar(ebcdic);
+bool KeyboardState::handleChar(uint32_t unicodeChar) {
+    int ebcdic = codec_.fromUnicode(unicodeChar);
+    if (ebcdic < 0) return false;   // not in this code page
+    return handleEbcdicChar(static_cast<uint8_t>(ebcdic));
 }
 
 bool KeyboardState::handleEbcdicChar(uint8_t ebcdic) {
@@ -247,17 +255,17 @@ bool KeyboardState::handleEraseInput() {
 
 bool KeyboardState::handleNewLine() {
     if (isLocked()) return false;
-    // Move cursor to first unprotected field on the next line
+    // Move to the start of the next line if that is an input position,
+    // otherwise to the first input position after it.
     int curRow = screen_.cursorPos() / screen_.cols();
     int nextRowStart = ((curRow + 1) % screen_.rows()) * screen_.cols();
-    // Search forward from nextRowStart for first unprotected field
-    for (int i = 0; i < screen_.size(); ++i) {
-        int pos = (nextRowStart + i) % screen_.size();
-        if (screen_.at(pos).isFA && !screen_.at(pos).isSkip()) {
-            screen_.setCursor((pos + 1) % screen_.size());
-            return true;
-        }
+    int fa = screen_.findFieldStart(nextRowStart);
+    if (fa < 0 || (!screen_.at(nextRowStart).isFA && !screen_.at(fa).isProtected())) {
+        screen_.setCursor(nextRowStart);   // unformatted, or inside an input field
+        return true;
     }
+    int pos = nextUnprotected(nextRowStart);
+    screen_.setCursor(pos >= 0 ? pos : 0);
     return true;
 }
 

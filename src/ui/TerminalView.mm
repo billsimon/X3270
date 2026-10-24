@@ -714,6 +714,19 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     return [super performKeyEquivalent:event];
 }
 
+/// YES if the key event produced a printable character.  Option-composed
+/// characters count: Option is how a Mac types ¢ ¬ £ on US layouts and
+/// [ ] { } | @ on many European ones (Option shortcuts are matched earlier).
+static BOOL isTypedCharacter(NSEvent *event) {
+    if (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) return NO;
+    NSString *chars = event.characters;
+    if (chars.length == 0) return NO;
+    unichar c = [chars characterAtIndex:0];
+    if (c < 0x20 || (c >= 0x7F && c < 0xA0)) return NO;     // C0/C1 controls, DEL
+    if (c >= 0xF700 && c <= 0xF8FF) return NO;              // AppKit function keys
+    return YES;
+}
+
 - (void)keyDown:(NSEvent *)event {
     if (!_kbd && !_kbd5250) { [super keyDown:event]; return; }
 
@@ -771,14 +784,10 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
         else if (key == NSDownArrowFunctionKey)  { handled = _kbd5250->handleArrow(+1, 0); }
         else if (key == NSLeftArrowFunctionKey)  { handled = _kbd5250->handleArrow(0, -1); }
         else if (key == NSRightArrowFunctionKey) { handled = _kbd5250->handleArrow(0, +1); }
-        else if (!altDown) {
-            NSString *chars = event.characters;
-            if (chars.length > 0) {
-                unichar c = [chars characterAtIndex:0];
-                if (c >= 0x20 && c < 0x80) {
-                    handled = _kbd5250->handleChar(static_cast<uint8_t>(c));
-                }
-            }
+        else if (isTypedCharacter(event)) {
+            unichar c = [event.characters characterAtIndex:0];
+            if (_codec.fromUnicode(c) < 0) NSBeep();   // not in this code page
+            else handled = _kbd5250->handleChar(c);
         }
 
         if (handled) {
@@ -849,15 +858,11 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
     else if (altDown && (key == 'e' || key == 'E')) {
         handled = _kbd->handleEraseInput();
     }
-    // Printable ASCII
-    else if (!altDown) {
-        NSString *chars = event.characters;
-        if (chars.length > 0) {
-            unichar c = [chars characterAtIndex:0];
-            if (c >= 0x20 && c < 0x80) {
-                handled = _kbd->handleChar(static_cast<uint8_t>(c));
-            }
-        }
+    // Printable characters
+    else if (isTypedCharacter(event)) {
+        unichar c = [event.characters characterAtIndex:0];
+        if (_codec.fromUnicode(c) < 0) NSBeep();   // not in this code page
+        else handled = _kbd->handleChar(c);
     }
 
     if (handled) {
@@ -931,18 +936,9 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
 // ── Clipboard (Copy / Paste) ──────────────────────────────────────────────────
 
 - (uint8_t)ebcdicForUnichar:(unichar)c {
-    // 1. Reverse-lookup using the active Code Page
-    for (int i = 0; i < 256; i++) {
-        if (_codec.toUnicode((uint8_t)i) == c) {
-            return (uint8_t)i;
-        }
-    }
-    // 2. ASCII fallback
-    if (c < 128) {
-        return _codec.fromAscii((uint8_t)c);
-    }
-    // 3. Unmapped character -> EBCDIC '?'
-    return 0x3F;
+    // Same mapping as typed input; unmapped characters paste as EBCDIC '?'
+    int e = _codec.fromUnicode(c);
+    return e >= 0 ? (uint8_t)e : 0x6F;
 }
 
 - (void)copy:(id)sender {

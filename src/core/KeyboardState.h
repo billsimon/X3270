@@ -58,7 +58,7 @@ public:
 
     // ── Key handlers (called by UI on keyDown) ────────────────────────────────
     // Returns false if the key was rejected (keyboard locked / protected field)
-    bool handleChar(uint8_t asciiChar);   // printable character input
+    bool handleChar(uint32_t unicodeChar);  // typed character (any code page graphic)
     bool handleEbcdicChar(uint8_t ebcdic); // raw EBCDIC input (used for pasting)
     bool handleTab(bool backward = false);
     bool handleEnter();
@@ -80,6 +80,7 @@ public:
 private:
     void sendAID(uint8_t aidCode, bool includeModifiedFields);
     void sendPAKey(uint8_t aidCode);
+    int  nextUnprotected(int from) const;
     void moveCursorToFirstUnprotected();
     void advanceToNextField(bool forward);
     // Returns the field attribute governing cursorPos, or 0 if unformatted

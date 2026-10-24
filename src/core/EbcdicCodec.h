@@ -18,8 +18,12 @@ public:
     /// EBCDIC byte → Unicode code point (BMP only, returned as uint16_t)
     uint16_t toUnicode(uint8_t ebcdic) const;
 
-    /// ASCII/Latin-1 byte → EBCDIC byte (best-effort; unmapped chars → 0x3F '?')
+    /// ASCII byte → EBCDIC byte (non-ASCII → EBCDIC '?')
     uint8_t fromAscii(uint8_t ascii) const;
+
+    /// Unicode code point → EBCDIC byte in the active code page, or -1 if the
+    /// code page has no such graphic character.
+    int fromUnicode(uint32_t cp) const;
 
     /// Convenience: convert a buffer of EBCDIC bytes to a UTF-8 std::string
     std::string ebcdicToUtf8(const uint8_t* data, size_t len) const;
