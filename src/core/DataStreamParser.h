@@ -80,6 +80,7 @@ private:
         RA_Addr1,       // RA: 2-byte dest address + 1 char
         RA_Addr2,
         RA_Char,
+        RA_GEChar,      // RA: character introduced by GE
         EUA_Addr1,      // EUA: 2-byte dest address
         EUA_Addr2,
         SFE_Count,      // SFE: count byte
@@ -99,6 +100,9 @@ private:
     void handleOrder(uint8_t order);
 
     void doWrite(bool eraseFirst, bool alternate);
+    void doEraseAllUnprotected();
+    void programTab();
+    void writeData(uint8_t b);
 
     /// Parse a Write Structured Field record and respond to Read Partition Query.
     void handleWSF(const std::vector<uint8_t>& record);
@@ -121,6 +125,12 @@ private:
     uint8_t      sfeHighlight_{ 0 }; // SFE/SA highlight accumulator
     uint8_t      mfCount_ { 0 };
     uint8_t      mfType_  { 0 };
+    bool         mfOnFA_  { false }; // MF applies only when the buffer address is an FA
+
+    // PT null-fills the rest of the field only when it follows data; these
+    // track the previous item in the Write (as x3270's last_cmd / last_zpt).
+    bool         lastWasOrder_ { true };
+    bool         lastZpt_      { false };
 
     AlarmCallback           alarmCb_;
     UnlockCallback          unlockCb_;

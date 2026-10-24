@@ -165,6 +165,8 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
 
     int      _rows;    // character grid rows (mirrors _screen->rows())
     int      _cols;    // character grid cols (mirrors _screen->cols())
+    int      _maxRows; // layout size: the model's alternate screen, which
+    int      _maxCols; //   Erase/Write (24×80) may temporarily undercut
     CGFloat  _charW;   // character cell width
     CGFloat  _charH;   // character cell height (ascent + descent + leading)
     CGFloat  _baseline; // distance from cell bottom to text baseline
@@ -178,8 +180,8 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
         _codec = x3270::EbcdicCodec(x3270::CodePage::CP037);
         _codec.setHerculesBrackets([[NSUserDefaults standardUserDefaults] boolForKey:kPrefHerculesBrackets]);
         _cursorVisible = YES;
-        _rows = 24;  // default; updated when screen buffer is attached
-        _cols = 80;
+        _rows = _maxRows = 24;  // default; updated when screen buffer is attached
+        _cols = _maxCols = 80;
 
         _selStart = -1;
         _selEnd = -1;
@@ -266,7 +268,7 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
 }
 
 - (NSSize)preferredSize {
-    return NSMakeSize(_charW * _cols, _charH * (_rows + kOIARows));
+    return NSMakeSize(_charW * _maxCols, _charH * (_maxRows + kOIARows));
 }
 
 - (void)setScreenBuffer:(x3270::ScreenBuffer*)screen
@@ -275,8 +277,9 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
     _kbd     = kbd;
     _kbd5250 = nullptr;
     if (screen) {
-        _rows = screen->rows();
-        _cols = screen->cols();
+        _maxRows = screen->maxRows();
+        _maxCols = screen->maxCols();
+        [self syncGridSize];
     }
 }
 
@@ -286,9 +289,19 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
     _kbd     = nullptr;
     _kbd5250 = kbd;
     if (screen) {
-        _rows = screen->rows();
-        _cols = screen->cols();
+        _maxRows = screen->maxRows();
+        _maxCols = screen->maxCols();
+        [self syncGridSize];
     }
+}
+
+/// Pick up a screen size change (Erase/Write vs Erase/Write Alternate, Clear).
+- (void)syncGridSize {
+    if (!_screen) return;
+    if (_screen->rows() == _rows && _screen->cols() == _cols) return;
+    _rows = _screen->rows();
+    _cols = _screen->cols();
+    _selStart = _selEnd = -1;   // offsets from the old geometry are meaningless
 }
 
 - (void)setGraphicsBuffer:(x3270::GraphicsBuffer*)graphics {
@@ -296,6 +309,7 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
 }
 
 - (void)screenDidUpdate {
+    [self syncGridSize];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self setNeedsDisplay:YES];
     });
@@ -327,6 +341,7 @@ static BOOL fieldIsNonDisplay(const x3270::Cell *fa, BOOL is5250) {
     if (!_screen) {
         return;
     }
+    [self syncGridSize];
 
     const BOOL is5250 = (_kbd5250 != nullptr);
 
@@ -485,7 +500,7 @@ static constexpr CGFloat kGocaCellW = 9.0;  // must match AW in buildQueryReply(
 static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply()
 
 - (void)drawGraphicsOverlay:(CGContextRef)ctx {
-    const CGFloat textAreaH = _rows * _charH;
+    const CGFloat textAreaH = _maxRows * _charH;
     const CGFloat textAreaY = kOIARows * _charH; // Cocoa Y of text-area bottom edge
     const CGFloat scaleX    = _charW / kGocaCellW;
     const CGFloat scaleY    = _charH / kGocaCellH;
@@ -594,7 +609,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
 }
 
 - (void)drawOIA {
-    CGFloat oiaY = self.bounds.size.height - (_rows + 1) * _charH;
+    CGFloat oiaY = self.bounds.size.height - (_maxRows + 1) * _charH;
     // Separator line
     [[NSColor colorWithWhite:0.4 alpha:1.0] setFill];
     NSRectFill(NSMakeRect(0, oiaY + _charH - 1, self.bounds.size.width, 1.0));
@@ -859,6 +874,7 @@ static constexpr CGFloat kGocaCellH = 12.0; // must match AH in buildQueryReply(
 
 - (int)offsetForPoint:(NSPoint)pt {
     if (!_screen) return -1;
+    [self syncGridSize];
     
     int col = (int)(pt.x / _charW);
     // Cocoa Y is bottom-up, but row 0 is at the top of the terminal grid.

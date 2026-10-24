@@ -53,6 +53,9 @@ void DataStreamParser::processRecord(const std::vector<uint8_t>& record) {
             state_ = ParseState::RA_Char;
             break;
         case ParseState::RA_Char:
+            if (b == ORD_GE) { state_ = ParseState::RA_GEChar; break; }
+            [[fallthrough]];
+        case ParseState::RA_GEChar:
             screen_.repeatToAddress(ScreenBuffer::decodeAddress(raAddr1_, sbaByte1_), b);
             state_ = ParseState::Data;
             break;
@@ -107,29 +110,44 @@ void DataStreamParser::processRecord(const std::vector<uint8_t>& record) {
             // SA (Set Attribute) applies to subsequent characters until field boundary.
             // Type codes match SFE: 0x42=fg colour, 0x45=bg colour, 0x41=highlight.
             // A value of 0x00 resets that attribute to the field default.
-            if      (sfeType_ == 0x42) screen_.setCurrentFgColor(b);
+            // Type 0x00 resets all character attributes.
+            if      (sfeType_ == 0x00) screen_.resetCharAttributes();
+            else if (sfeType_ == 0x42) screen_.setCurrentFgColor(b);
             else if (sfeType_ == 0x45) screen_.setCurrentBgColor(b);
             else if (sfeType_ == 0x41) screen_.setCurrentHighlight(b);
             state_ = ParseState::Data;
             break;
         case ParseState::MF_Count:
+            // Modify Field changes the attributes of the field whose FA is at
+            // the buffer address, then steps past it.  If the address is not
+            // an FA the pairs are skipped and the address does not move.
             mfCount_ = b;
-            if (mfCount_ == 0) state_ = ParseState::Data;
-            else                state_ = ParseState::MF_Type;
+            mfOnFA_  = screen_.at(screen_.bufferPointer()).isFA;
+            if (mfCount_ == 0) {
+                if (mfOnFA_) screen_.setBufferAddress(screen_.bufferPointer() + 1);
+                state_ = ParseState::Data;
+            } else {
+                state_ = ParseState::MF_Type;
+            }
             break;
         case ParseState::MF_Type:
             mfType_ = b;
             state_ = ParseState::MF_Value;
             break;
         case ParseState::MF_Value:
-            // Phase 1: ignore MF (used to change attrs without rewriting field)
+            if (mfOnFA_) screen_.modifyFieldAttribute(mfType_, b);
             --mfCount_;
-            state_ = (mfCount_ > 0) ? ParseState::MF_Type : ParseState::Data;
+            if (mfCount_ > 0) {
+                state_ = ParseState::MF_Type;
+            } else {
+                if (mfOnFA_) screen_.setBufferAddress(screen_.bufferPointer() + 1);
+                state_ = ParseState::Data;
+            }
             break;
         case ParseState::GE_Char:
             // Graphic Escape: display character from alternate code page
             // Phase 1: treat as normal EBCDIC character
-            screen_.writeChar(b);
+            writeData(b);
             state_ = ParseState::Data;
             break;
         case ParseState::SkipRecord:
@@ -151,12 +169,17 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
         break;
     case CMD_ERASE_WRITE_ALT:
     case CMD_ERASE_WRITE_ALT_SNA:
-        doWrite(true, true);  // alternate size (Phase 1: same as default)
+        doWrite(true, true);
         break;
     case CMD_ERASE_ALL_UNPROTECTED:
     case CMD_ERASE_ALL_UNPROTECTED_SNA:
-        screen_.eraseAllUnprotected();
-        state_ = ParseState::Command; // no further data
+        doEraseAllUnprotected();
+        state_ = ParseState::SkipRecord; // no further data
+        break;
+    case CMD_READ_BUFFER:
+    case CMD_READ_BUFFER_SNA:
+        if (sendCb_) sendCb_(screen_.buildReadBufferRecord(0x60 /*no-AID*/));
+        state_ = ParseState::SkipRecord;
         break;
     case CMD_READ_MODIFIED:
     case CMD_READ_MODIFIED_SNA:
@@ -165,7 +188,7 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
             auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/);
             sendCb_(data);
         }
-        state_ = ParseState::Command;
+        state_ = ParseState::SkipRecord;
         break;
     case CMD_READ_MODIFIED_ALL:
     case CMD_READ_MODIFIED_ALL_SNA:
@@ -174,7 +197,7 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
             auto data = screen_.buildReadModifiedRecord(0x60 /*no-AID*/, true);
             sendCb_(data);
         }
-        state_ = ParseState::Command;
+        state_ = ParseState::SkipRecord;
         break;
     case CMD_WRITE_STRUCTURED_FIELD:
     case CMD_WRITE_STRUCTURED_FIELD_SNA:
@@ -182,20 +205,34 @@ void DataStreamParser::handleCommand(uint8_t cmd) {
         state_ = ParseState::SkipRecord;
         break;
     default:
-        // Unknown command — skip to Data state
-        state_ = ParseState::Data;
+        // Unknown command — ignore the record rather than paint it as text
+        state_ = ParseState::SkipRecord;
         break;
     }
 }
 
-void DataStreamParser::doWrite(bool eraseFirst, bool /*alternate*/) {
+void DataStreamParser::doWrite(bool eraseFirst, bool alternate) {
     if (eraseFirst) {
-        screen_.eraseAll();  // resets bufPtr_, cursorPos_ and SA attributes
+        // Erase/Write selects the default 24×80 screen, Erase/Write Alternate
+        // the model's alternate size; both reset bufPtr_, cursorPos_ and SA.
+        screen_.setAlternateSize(alternate);
     }
     // SA character attributes last only until the end of a Write.
     screen_.resetCharAttributes();
-    // Plain Write: buffer address is unchanged; host uses SBA orders to position.
+    // Every Write starts at the cursor address.
+    screen_.setBufferAddress(screen_.cursorPos());
+    lastWasOrder_ = true;
+    lastZpt_      = false;
     state_ = ParseState::WCC;
+}
+
+void DataStreamParser::doEraseAllUnprotected() {
+    // EAU also resets MDTs, moves the cursor to the first unprotected field
+    // (address 0 if there is none) and unlocks the keyboard.
+    screen_.eraseAllUnprotected();
+    screen_.setCursor(0);
+    screen_.setCursorToHome();
+    if (unlockCb_) unlockCb_();
 }
 
 // ── Write Control Character ───────────────────────────────────────────────────
@@ -207,7 +244,61 @@ void DataStreamParser::handleWCC(uint8_t wcc) {
 }
 
 // ── Data / Order byte dispatch ────────────────────────────────────────────────
+void DataStreamParser::writeData(uint8_t b) {
+    screen_.writeChar(b);
+    lastWasOrder_ = false;
+    lastZpt_      = false;
+}
+
+// Program Tab: move to the first character of the next unprotected field,
+// without wrapping (address 0 if there is none).  When PT follows data rather
+// than a command or order, the rest of the current field is nulled first.
+void DataStreamParser::programTab() {
+    const int sz  = screen_.size();
+    const int cur = screen_.bufferPointer();
+    const Cell& here = screen_.at(cur);
+    if (here.isFA && !here.isProtected()) {
+        screen_.setBufferAddress(cur + 1);
+        lastZpt_ = false;
+        return;
+    }
+    int target = 0;
+    for (int pos = cur; ; ) {
+        int next = (pos + 1) % sz;
+        const Cell& c = screen_.at(pos);
+        if (c.isFA && !c.isProtected() && !screen_.at(next).isFA) { target = next; break; }
+        pos = next;
+        if (pos == cur) break;
+    }
+    if (target < cur) target = 0;
+
+    if (!lastWasOrder_ || lastZpt_) {
+        for (int pos = cur; pos != target && !screen_.at(pos).isFA; pos = (pos + 1) % sz)
+            screen_.at(pos).ch = 0x00;
+        lastZpt_ = (target == 0);
+        screen_.markDirty();
+    } else {
+        lastZpt_ = false;
+    }
+    screen_.setBufferAddress(target);
+}
+
 void DataStreamParser::handleDataByte(uint8_t b) {
+    if (b == ORD_PT) {
+        programTab();
+        lastWasOrder_ = true;
+        return;
+    }
+    switch (b) {
+    case ORD_SF: case ORD_SFE: case ORD_SBA: case ORD_SA: case ORD_IC:
+    case ORD_RA: case ORD_EUA: case ORD_MF:
+        lastWasOrder_ = true;
+        lastZpt_      = false;
+        break;
+    default:
+        break;
+    }
+
     // Check if this byte is an order code
     switch (b) {
     case ORD_SF:   state_ = ParseState::SF_Attr;  break;
@@ -215,28 +306,13 @@ void DataStreamParser::handleDataByte(uint8_t b) {
     case ORD_SBA:  state_ = ParseState::SBA_Byte1; break;
     case ORD_SA:   state_ = ParseState::SA_Type;   break;
     case ORD_IC:   screen_.insertCursorHere();     break; // IC: no params
-    case ORD_PT:
-        // Program Tab: advance bufPtr to next unprotected field
-        // Phase 1 simplified: advance one cell at a time until FA that is not protected
-        {
-            const int sz = screen_.size();
-            int pos = screen_.bufferPointer();
-            for (int i = 0; i < sz; ++i) {
-                pos = (pos + 1) % sz;
-                if (screen_.at(pos).isFA && !screen_.at(pos).isProtected()) {
-                    screen_.setBufferAddress((pos + 1) % sz);
-                    break;
-                }
-            }
-        }
-        break;
     case ORD_RA:   state_ = ParseState::RA_Addr1;  break;
     case ORD_EUA:  state_ = ParseState::EUA_Addr1; break;
     case ORD_GE:   state_ = ParseState::GE_Char;   break;
     case ORD_MF:   state_ = ParseState::MF_Count;  break;
     default:
         // Plain data byte — write to buffer
-        screen_.writeChar(b);
+        writeData(b);
         break;
     }
 }
@@ -280,12 +356,44 @@ void DataStreamParser::handleWSF(const std::vector<uint8_t>& record) {
         switch (sfType) {
 
         case 0x01:
-            // ── Read Partition (Query / QueryList) ────────────────────────────
-            if (sfLen >= 5) {
-                uint8_t queryType = record[i + 4]; // [partition_id][query_type]
-                if ((queryType == 0x02 || queryType == 0x03) && sendCb_) {
+            // ── Read Partition ────────────────────────────────────────────────
+            if (sfLen >= 5 && sendCb_) {
+                uint8_t readType = record[i + 4]; // [partition_id][type]
+                switch (readType) {
+                case 0x02: // Query
+                case 0x03: // Query List (we always reply with everything)
                     sendCb_(buildQueryReply());
+                    break;
+                case 0xF1: // Read Buffer
+                    sendCb_(screen_.buildReadBufferRecord(0x60));
+                    break;
+                case 0xF6: // Read Modified
+                    sendCb_(screen_.buildReadModifiedRecord(0x60));
+                    break;
+                case 0x6E: // Read Modified All
+                    sendCb_(screen_.buildReadModifiedRecord(0x60, true));
+                    break;
+                default:
+                    break;
                 }
+            }
+            break;
+
+        case 0x03:
+            // ── Erase/Reset: flag 0x80 selects the alternate screen size ──────
+            if (payloadSize >= 1) {
+                screen_.setAlternateSize((payload[0] & 0x80) != 0);
+                screen_.resetCharAttributes();
+            }
+            break;
+
+        case 0x40:
+            // ── Outbound 3270DS: [partition][command][WCC][orders/data] ───────
+            // An ordinary Write/EW/EWA/EAU carried inside a structured field.
+            if (payloadSize >= 2 &&
+                payload[1] != CMD_WRITE_STRUCTURED_FIELD &&
+                payload[1] != CMD_WRITE_STRUCTURED_FIELD_SNA) {
+                processRecord(std::vector<uint8_t>(payload + 1, payload + payloadSize));
             }
             break;
 
@@ -331,89 +439,79 @@ void DataStreamParser::handleWSF(const std::vector<uint8_t>& record) {
 }
 
 // ── Query Reply builder ───────────────────────────────────────────────────────
-// Returns a Query Reply record with Usable Area dimensions taken from the
-// attached ScreenBuffer so the host sees the correct model dimensions.
+// AID 0x88 followed by one Query Reply structured field per supported
+// function.  Every QR is [len_hi][len_lo][0x81][QCODE][body], where the
+// length counts the whole SF (IBM GA23-0059 ch. 6; layouts match x3270).
 std::vector<uint8_t> DataStreamParser::buildQueryReply() const {
     std::vector<uint8_t> r;
-
-    const int rows = screen_.rows();
-    const int cols = screen_.cols();
-    const int sz   = screen_.size();
-    // For screens larger than 4095 cells, advertise 14-bit addressing support.
-    const uint8_t addrMode = (sz > 4095) ? 0x00 : 0x01;
-
-    // AID byte: Query Reply (0x88)
     r.push_back(0x88);
 
-    // ── Query Reply (Summary) — 0x81 ────────────────────────────────────────
-    // MUST list every QR type present in this response (including itself).
-    // Length = 2 (len field) + 1 (type) + N listed codes.
-    // Types listed: Usable Area=0x80, Summary=0x81, Data Streams=0x84, Color=0x86, Highlight=0x87
-    r.push_back(0x00); r.push_back(0x08); // length = 8
-    r.push_back(0x81);                    // type: Summary
-    r.push_back(0x80);                    // Usable Area
-    r.push_back(0x81);                    // Summary itself
-    r.push_back(0x84);                    // Data Streams (GOCA)
-    r.push_back(0x86);                    // Color
-    r.push_back(0x87);                    // Highlighting
+    auto put16 = [&r](int v) {
+        r.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        r.push_back(static_cast<uint8_t>(v & 0xFF));
+    };
+    // Append one QR: header with a placeholder length, body, then patch length.
+    auto qr = [&r](uint8_t qcode, auto&& body) {
+        size_t start = r.size();
+        r.push_back(0x00); r.push_back(0x00);
+        r.push_back(0x81);
+        r.push_back(qcode);
+        body();
+        size_t len = r.size() - start;
+        r[start]     = static_cast<uint8_t>(len >> 8);
+        r[start + 1] = static_cast<uint8_t>(len & 0xFF);
+    };
 
-    // ── Query Reply (Usable Area) — 0x80 ────────────────────────────────────
-    // 2+1+1+1+2+2+1+2+2+1+1+2 = 18 bytes  (per IBM GA23-0059)
-    r.push_back(0x00); r.push_back(0x12);                           // length = 18
-    r.push_back(0x80);                                               // type: Usable Area
-    r.push_back(addrMode);                                           // addressing mode
-    r.push_back(0x00);                                               // flags (reserved)
-    r.push_back(static_cast<uint8_t>(cols >> 8));
-    r.push_back(static_cast<uint8_t>(cols & 0xFF));                 // usable cols
-    r.push_back(static_cast<uint8_t>(rows >> 8));
-    r.push_back(static_cast<uint8_t>(rows & 0xFF));                 // usable rows
-    r.push_back(0x01);                                               // units: mm
-    r.push_back(0x00); r.push_back(0x60);                           // Xr = 96 units/mm
-    r.push_back(0x00); r.push_back(0x70);                           // Yr = 112 units/mm
-    r.push_back(0x09);                                               // AW = 9 (cell width)
-    r.push_back(0x0C);                                               // AH = 12 (cell height)
-    r.push_back(static_cast<uint8_t>(sz >> 8));
-    r.push_back(static_cast<uint8_t>(sz & 0xFF));                   // buffer size
+    // The host formats for the alternate (largest) size.
+    const int rows = screen_.maxRows();
+    const int cols = screen_.maxCols();
 
-    // ── Query Reply (Color) — 0x86 ───────────────────────────────────────────
-    // Reports 8 standard 3270 extended colors (GA23-0059 §6.7).
-    // Format: flags(1) + Np(1) + Np×[attr-code(1), device-code(1)]
-    // 2+1+1+1+8×2 = 21 bytes
-    r.push_back(0x00); r.push_back(0x15); // length = 21
-    r.push_back(0x86);                    // type: Color
-    r.push_back(0x00);                    // flags (bit 0: field color supported)
-    r.push_back(0x08);                    // Np = 8 color pairs
-    r.push_back(0x00); r.push_back(0xF4); // default fg → green (0xF4)
-    r.push_back(0xF1); r.push_back(0xF1); // blue      → blue
-    r.push_back(0xF2); r.push_back(0xF2); // red       → red
-    r.push_back(0xF3); r.push_back(0xF3); // pink      → pink
-    r.push_back(0xF4); r.push_back(0xF4); // green     → green
-    r.push_back(0xF5); r.push_back(0xF5); // turquoise → turquoise
-    r.push_back(0xF6); r.push_back(0xF6); // yellow    → yellow
-    r.push_back(0xF7); r.push_back(0xF7); // white     → white
+    // ── Summary (0x80): every QR in this reply, including itself ────────────
+    qr(0x80, [&] {
+        for (uint8_t q : { 0x80, 0x81, 0x86, 0x87, 0xA6 }) r.push_back(q);
+    });
 
-    // ── Query Reply (Highlighting) — 0x87 ───────────────────────────────────
-    // Reports 5 extended highlighting attributes (GA23-0059 §6.8).
-    // Format: Np(1) + Np×[attr-code(1), device-code(1)]
-    // 2+1+1+5×2 = 14 bytes
-    r.push_back(0x00); r.push_back(0x0E); // length = 14
-    r.push_back(0x87);                    // type: Highlighting
-    r.push_back(0x05);                    // Np = 5 highlight pairs
-    r.push_back(0x00); r.push_back(0x00); // default    → normal
-    r.push_back(0xF1); r.push_back(0xF1); // blink      → blink
-    r.push_back(0xF2); r.push_back(0xF2); // reverse    → reverse video
-    r.push_back(0xF4); r.push_back(0xF4); // underscore → underscore
-    r.push_back(0xF8); r.push_back(0xF8); // intensify  → intensify
+    // ── Usable Area (0x81) ───────────────────────────────────────────────────
+    qr(0x81, [&] {
+        r.push_back(0x01);           // 12/14-bit addressing allowed
+        r.push_back(0x00);           // no special character features
+        put16(cols);                 // width in cells
+        put16(rows);                 // height in cells
+        r.push_back(0x01);           // units: millimetres
+        put16(1); put16(4);          // Xr = 1/4 mm per pel
+        put16(1); put16(4);          // Yr = 1/4 mm per pel
+        r.push_back(0x09);           // AW: cell width in pels  (kGocaCellW)
+        r.push_back(0x0C);           // AH: cell height in pels (kGocaCellH)
+        put16(rows * cols);          // buffer size
+    });
 
-    // ── Query Reply (Data Streams) — 0x84 ───────────────────────────────────
-    // Advertises GOCA (Graphics Object Content Architecture) support.
-    // Format: flags(1) + Np(1) + Np×stream-type(1)
-    // Length = 2 (len field) + 1 (type) + 1 (flags) + 1 (Np) + 1 (GOCA code) = 6
-    r.push_back(0x00); r.push_back(0x06); // length = 6
-    r.push_back(0x84);                    // type: Data Streams
-    r.push_back(0x00);                    // flags (reserved)
-    r.push_back(0x01);                    // Np = 1 supported stream type
-    r.push_back(0x02);                    // stream type 0x02 = GOCA
+    // ── Color (0x86): default → green, then the 7 base colours ──────────────
+    qr(0x86, [&] {
+        r.push_back(0x00);           // flags
+        r.push_back(0x08);           // 8 attribute/colour pairs
+        r.push_back(0x00); r.push_back(0xF4);
+        for (uint8_t c = 0xF1; c <= 0xF7; ++c) { r.push_back(c); r.push_back(c); }
+    });
+
+    // ── Highlighting (0x87) ─────────────────────────────────────────────────
+    qr(0x87, [&] {
+        r.push_back(0x05);           // 5 pairs
+        r.push_back(0x00); r.push_back(0xF0); // default    → normal
+        r.push_back(0xF1); r.push_back(0xF1); // blink
+        r.push_back(0xF2); r.push_back(0xF2); // reverse
+        r.push_back(0xF4); r.push_back(0xF4); // underscore
+        r.push_back(0xF8); r.push_back(0xF8); // intensify
+    });
+
+    // ── Implicit Partition (0xA6): default and alternate screen sizes ───────
+    qr(0xA6, [&] {
+        r.push_back(0x00); r.push_back(0x00); // reserved
+        r.push_back(0x0B);           // length of this self-defining parameter
+        r.push_back(0x01);           // implicit partition sizes
+        r.push_back(0x00);           // reserved
+        put16(80);  put16(24);       // default width, height
+        put16(cols); put16(rows);    // alternate width, height
+    });
 
     return r;
 }

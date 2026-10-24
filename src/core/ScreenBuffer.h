@@ -46,11 +46,20 @@ class ScreenBuffer {
 public:
     explicit ScreenBuffer(TerminalModel model = TerminalModel::Model2);
 
-    // Runtime grid dimensions
+    // Runtime grid dimensions (the current default or alternate size)
     int rows()  const { return rows_; }
     int cols()  const { return cols_; }
     int size()  const { return rows_ * cols_; }
     TerminalModel model() const { return model_; }
+
+    // Largest grid this buffer can take: the model's alternate size.
+    int maxRows() const { return rowsForModel(model_); }
+    int maxCols() const { return colsForModel(model_); }
+
+    /// Switch between the default 24×80 screen (Erase/Write, Clear key) and
+    /// the model's alternate screen (Erase/Write Alternate).  Erases the buffer.
+    void setAlternateSize(bool alternate);
+    bool isAlternateSize() const { return alternate_; }
 
     // ── Buffer access ─────────────────────────────────────────────────────────
     Cell&       at(int offset)       { return cells_[offset]; }
@@ -108,6 +117,10 @@ public:
     /// Insert cursor marker at current bufferPointer_
     void insertCursorHere() { cursorPos_ = bufPtr_; }
 
+    /// Modify Field: apply one attribute type/value pair to the FA at the
+    /// buffer pointer (0xC0 = basic attribute, 0x41 highlight, 0x42/0x45 colour).
+    void modifyFieldAttribute(uint8_t type, uint8_t value);
+
     // ── Read Modified (build client→host AID data) ────────────────────────────
     struct ModifiedField {
         int              startPos;
@@ -121,6 +134,10 @@ public:
     /// Build Read Modified data: SBA(cursor) + {SBA(field)+data} for each MDT field.
     /// Pass includeProtected=true only for Read Modified All.
     std::vector<uint8_t> buildReadModifiedRecord(int aidByte, bool includeProtected = false) const;
+
+    /// Build a Read Buffer reply: AID + cursor + every buffer position in
+    /// order, with each field attribute sent as SF + attribute byte.
+    std::vector<uint8_t> buildReadBufferRecord(int aidByte) const;
 
     /// Clear MDT bit on all unprotected fields
     void resetAllMDT();
@@ -154,6 +171,7 @@ private:
     }
 
     TerminalModel model_;
+    bool    alternate_        { true };   // power-on: model (alternate) size
     int     rows_;
     int     cols_;
     std::vector<Cell> cells_;

@@ -25,6 +25,19 @@ ScreenBuffer::ScreenBuffer(TerminalModel model)
     eraseAll();
 }
 
+void ScreenBuffer::setAlternateSize(bool alternate) {
+    // The default screen is always 24×80; the alternate is the model's size.
+    int r = alternate ? rowsForModel(model_) : 24;
+    int c = alternate ? colsForModel(model_) : 80;
+    alternate_ = alternate;
+    if (r != rows_ || c != cols_) {
+        rows_ = r;
+        cols_ = c;
+        cells_.assign(r * c, Cell{});
+    }
+    eraseAll();
+}
+
 // ── Buffer operations ─────────────────────────────────────────────────────────
 void ScreenBuffer::eraseAll() {
     for (auto& c : cells_) {
@@ -139,9 +152,12 @@ void ScreenBuffer::startInlineAttr5250(uint8_t attrByte5250) {
     dirty_ = true;
 }
 
+// RA and EUA run up to (not including) the stop address and leave the buffer
+// address there.  A stop address equal to the current address means the
+// whole buffer, hence do/while.
 void ScreenBuffer::repeatToAddress(int destOffset, uint8_t ebcdic) {
     int dest = clamp(destOffset);
-    while (bufPtr_ != dest) {
+    do {
         Cell& c     = cells_[bufPtr_];
         c.ch        = ebcdic;
         c.attr      = 0x00;
@@ -150,7 +166,7 @@ void ScreenBuffer::repeatToAddress(int destOffset, uint8_t ebcdic) {
         c.bgColor   = currentBgColor_;
         c.highlight = currentHighlight_;
         bufPtr_ = clamp(bufPtr_ + 1);
-    }
+    } while (bufPtr_ != dest);
     dirty_ = true;
 }
 
@@ -159,14 +175,25 @@ void ScreenBuffer::eraseUnprotectedToAddress(int destOffset) {
     int  pos  = bufPtr_;
     int  fa   = findFieldStart(pos);
     bool prot = fa >= 0 && cells_[fa].isProtected();
-    while (pos != dest) {
+    do {
         if (cells_[pos].isFA) {
             prot = cells_[pos].isProtected();
         } else if (!prot) {
             cells_[pos].ch = 0x00;
         }
         pos = clamp(pos + 1);
-    }
+    } while (pos != dest);
+    bufPtr_ = dest;
+    dirty_ = true;
+}
+
+void ScreenBuffer::modifyFieldAttribute(uint8_t type, uint8_t value) {
+    Cell& c = cells_[bufPtr_];
+    if (!c.isFA) return;
+    if      (type == 0xC0) c.attr      = value;
+    else if (type == 0x41) c.highlight = value;
+    else if (type == 0x42) c.fgColor   = value;
+    else if (type == 0x45) c.bgColor   = value;
     dirty_ = true;
 }
 
@@ -251,6 +278,25 @@ std::vector<uint8_t> ScreenBuffer::buildReadModifiedRecord(int aidByte, bool inc
         rec.push_back(addr[0]);
         rec.push_back(addr[1]);
         for (uint8_t b : mf.data) rec.push_back(b);
+    }
+    return rec;
+}
+
+std::vector<uint8_t> ScreenBuffer::buildReadBufferRecord(int aidByte) const {
+    std::vector<uint8_t> rec;
+    rec.reserve(3 + cells_.size() * 2);
+    rec.push_back(static_cast<uint8_t>(aidByte));
+    uint8_t cursorAddr[2];
+    encodeAddress(cursorPos_, cursorAddr);
+    rec.push_back(cursorAddr[0]);
+    rec.push_back(cursorAddr[1]);
+    for (const auto& c : cells_) {
+        if (c.isFA) {
+            rec.push_back(0x1D);                      // SF order
+            rec.push_back(kCodeTable[c.attr & 0x3F]); // attribute in graphic form
+        } else {
+            rec.push_back(c.ch);
+        }
     }
     return rec;
 }

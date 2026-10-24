@@ -117,12 +117,8 @@ void KeyboardState::sendAID(uint8_t aidCode, bool includeModifiedFields) {
     if (includeModifiedFields) {
         record = screen_.buildReadModifiedRecord(aidCode);
     } else {
-        // PA keys: just AID byte + cursor address
+        // PA keys and CLEAR are a "short read": the AID byte alone.
         record.push_back(aidCode);
-        uint8_t addr[2];
-        ScreenBuffer::encodeAddress(screen_.cursorPos(), addr);
-        record.push_back(addr[0]);
-        record.push_back(addr[1]);
     }
     if (sendCb_ && sendCb_(record)) lock(LockReason::System);
 }
@@ -166,13 +162,11 @@ bool KeyboardState::handleEnter() {
 }
 
 bool KeyboardState::handleClear() {
-    // Clear always sends even when locked
+    // Clear always sends even when locked.  It also returns the screen to
+    // the default (24×80) size.
     unlock();
-    screen_.eraseAll();
-    if (sendCb_) {
-        std::vector<uint8_t> record = { AID_CLEAR, 0x40, 0x40 }; // cursor at 0,0 encoded
-        if (sendCb_(record)) lock(LockReason::System);
-    }
+    screen_.setAlternateSize(false);
+    sendAID(AID_CLEAR, false);
     return true;
 }
 
