@@ -4,6 +4,9 @@
 #include "EbcdicCodec.h"
 
 static const CGFloat kFontSize = 11.0;
+// The log fills even while the window is closed, so keep only the most recent
+// ~2M characters; older lines are dropped from the top.
+static const NSUInteger kMaxLogChars = 2u << 20;
 
 @implementation DebugWindowController {
     NSTextView         *_textView;
@@ -184,6 +187,13 @@ static const CGFloat kFontSize = 11.0;
     NSTextStorage *ts2 = _textView.textStorage;
     [ts2 beginEditing];
     [ts2 appendAttributedString:as];
+    if (ts2.length > kMaxLogChars) {
+        NSUInteger cut = ts2.length - kMaxLogChars * 3 / 4;
+        NSRange nl = [ts2.string rangeOfString:@"\n" options:0
+                                         range:NSMakeRange(cut, ts2.length - cut)];
+        if (nl.location != NSNotFound) cut = NSMaxRange(nl);
+        [ts2 deleteCharactersInRange:NSMakeRange(0, cut)];
+    }
     [ts2 endEditing];
 
     NSScrollView *sv = _textView.enclosingScrollView;

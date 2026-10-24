@@ -281,7 +281,9 @@ void TN3270Session::handleTN3270eSb(const std::vector<uint8_t>& sb) {
             };
             sendSb(payload);
         } else if (sub == TN3270E_REJECT) {
-            // Server rejected our device type — fall back to classic TN3270
+            // Server rejected our device type — tell it we are giving up on
+            // TN3270E (RFC 2355) and fall back to classic TN3270
+            sendWont(OPT_TN3270E);
             tn3270eOffered_ = false;
             tn3270eMode_    = false;
             if (doBinary_ && doEOR_ && doTermType_) {
@@ -292,7 +294,17 @@ void TN3270Session::handleTN3270eSb(const std::vector<uint8_t>& sb) {
         }
     } else if (func == TN3270E_FUNCTIONS && sb.size() >= 3) {
         uint8_t sub = sb[2];
-        if (sub == TN3270E_IS) {
+        if (sub == TN3270E_REQUEST) {
+            // Server counter-proposal (RFC 2355): we support no optional
+            // functions, so agree to an empty list and re-request it otherwise.
+            std::vector<uint8_t> payload = { OPT_TN3270E, TN3270E_FUNCTIONS };
+            payload.push_back(sb.size() == 3 ? TN3270E_IS : TN3270E_REQUEST);
+            sendSb(payload);
+            if (sb.size() == 3) {
+                tn3270eMode_ = true;
+                enterDataMode();
+            }
+        } else if (sub == TN3270E_IS) {
             // Functions agreed — we are in TN3270E mode
             tn3270eMode_ = true;
             enterDataMode();
@@ -318,6 +330,9 @@ void TN3270Session::sendTerminalType() {
 void TN3270Session::enterDataMode() {
     if (state_ == State::Connected) return;
     state_ = State::Connected;
+    // Drop any NVT text (e.g. a banner) received before 3270 mode began, so
+    // it is not prepended to the first 3270 record.
+    currentRecord_.clear();
     if (connectedCb_) connectedCb_();
 }
 

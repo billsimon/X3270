@@ -170,9 +170,10 @@ bool KeyboardState::handleEnter() {
 }
 
 bool KeyboardState::handleClear() {
-    // Clear always sends even when locked.  It also returns the screen to
-    // the default (24×80) size.
-    unlock();
+    // Like the other AID keys, Clear is rejected while input is inhibited
+    // (Reset first).  It returns the screen to the default (24×80) size.
+    if (isLocked()) return false;
+    insertMode_ = false;
     screen_.setAlternateSize(false);
     sendAID(AID_CLEAR, false);
     return true;
