@@ -40,14 +40,8 @@ void ScreenBuffer::setAlternateSize(bool alternate) {
 
 // ── Buffer operations ─────────────────────────────────────────────────────────
 void ScreenBuffer::eraseAll() {
-    for (auto& c : cells_) {
-        c.ch        = 0x00;
-        c.attr      = 0x00;
-        c.isFA      = false;
-        c.fgColor   = 0x00;
-        c.bgColor   = 0x00;
-        c.highlight = 0x00;
-    }
+    for (auto& c : cells_) c = Cell{};
+    savedErrorLine_.clear();
     cursorPos_        = 0;
     bufPtr_           = 0;
     currentFgColor_   = 0x00;
@@ -209,6 +203,22 @@ int ScreenBuffer::findFieldStart(int bufPos) const {
         if (cells_[pos].isFA) return pos;
     }
     return -1; // no FA found (entire screen is unformatted)
+}
+
+// ── 5250 error line ───────────────────────────────────────────────────────────
+void ScreenBuffer::saveErrorLine() {
+    if (!savedErrorLine_.empty()) return;   // keep the original under repeated errors
+    auto first = cells_.begin() + (rows_ - 1) * cols_;
+    savedErrorLine_.assign(first, first + cols_);
+}
+
+void ScreenBuffer::restoreErrorLine() {
+    if (savedErrorLine_.empty()) return;
+    if (static_cast<int>(savedErrorLine_.size()) == cols_)
+        std::copy(savedErrorLine_.begin(), savedErrorLine_.end(),
+                  cells_.begin() + (rows_ - 1) * cols_);
+    savedErrorLine_.clear();
+    dirty_ = true;
 }
 
 // ── MDT operations ────────────────────────────────────────────────────────────

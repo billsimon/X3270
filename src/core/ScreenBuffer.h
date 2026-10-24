@@ -32,6 +32,8 @@ struct Cell {
     uint8_t  bgColor   { 0x00 }; // background colour (0=black)
     uint8_t  highlight { 0x00 }; // 0=normal, 0xF2=reverse, 0xF4=underscore, 0xF1=blink
     uint16_t fieldLen  { 0 };    // (FA cells only) usable character count; 0 = infer from layout
+    uint8_t  ffw1      { 0 };    // (5250 input-field FA only) raw Field Format Word bytes
+    uint8_t  ffw2      { 0 };
 
     bool isProtected()  const { return (attr & FA_PROTECTED) != 0; }
     bool isNumeric()    const { return (attr & FA_NUMERIC)   != 0; }
@@ -150,6 +152,13 @@ public:
     /// Set MDT on the field that owns the given buffer position
     void setMDT(int bufferPos);
 
+    /// 5250 Write Error Code: remember the last (message) row so the message
+    /// can be removed again when the operator presses Reset.
+    void saveErrorLine();
+    /// Put back the row saved by saveErrorLine(); no-op if none is saved.
+    void restoreErrorLine();
+    bool hasSavedErrorLine() const { return !savedErrorLine_.empty(); }
+
     // ── 3270 Buffer Address encoding/decoding ────────────────────────────────
     static int  decodeAddress(uint8_t b0, uint8_t b1);
     static void encodeAddress(int offset, uint8_t out[2]);
@@ -181,6 +190,7 @@ private:
     uint8_t currentFgColor_   { 0x00 };  // active SA character fg colour
     uint8_t currentBgColor_   { 0x00 };  // active SA character bg colour
     uint8_t currentHighlight_ { 0x00 };  // active SA highlight (reverse/underscore/blink)
+    std::vector<Cell> savedErrorLine_;   // see saveErrorLine()
 
     // Buffer address code table (64 entries, 6-bit index → 8-bit wire byte)
     static const uint8_t kCodeTable[64];

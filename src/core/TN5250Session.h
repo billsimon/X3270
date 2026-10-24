@@ -55,6 +55,12 @@ static constexpr uint8_t GDS_OP_OUTPUT_ONLY= 0x02;
 static constexpr uint8_t GDS_OP_PUT_GET    = 0x03; ///< Normal AID input record
 static constexpr uint8_t GDS_OP_READ_IMMED = 0x06;
 
+// GDS variable-header flags byte (tn5250 record.h)
+static constexpr uint8_t GDS_FLAG_ERR = 0x80; ///< data stream output error
+static constexpr uint8_t GDS_FLAG_ATN = 0x40; ///< Attention key
+static constexpr uint8_t GDS_FLAG_SRQ = 0x04; ///< System Request key
+static constexpr uint8_t GDS_FLAG_HLP = 0x01; ///< Help in error state
+
 // ── TN5250Session ─────────────────────────────────────────────────────────────
 class TN5250Session : public ITerminalSession {
 public:
@@ -89,8 +95,9 @@ public:
     /// Send a raw 5250 input record (GDS header is added here; uses PUT_GET opcode).
     bool sendRecord(const std::vector<uint8_t>& record) override;
 
-    /// Send a raw 5250 record with an explicit GDS opcode.
-    bool sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode);
+    /// Send a raw 5250 record with an explicit GDS opcode and header flags
+    /// (GDS_FLAG_ATN / GDS_FLAG_SRQ for the Attention and SysReq keys).
+    bool sendGdsRecord(const std::vector<uint8_t>& payload, uint8_t opcode, uint8_t flags = 0x00);
 
     /// Send Telnet IAC IP (Attention / system request).
     bool sendATTN();

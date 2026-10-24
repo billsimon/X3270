@@ -96,6 +96,13 @@
     ROW(@"Insert / Help / ⌘ I", @"Toggle insert mode (characters shift right)");
     ROW(@"Option + Delete",    @"Erase to End of Field — clears from cursor to end");
 
+    SECTION(@"5250 Sessions");
+    ROW(@"Escape",             @"Attention");
+    ROW(@"Shift + Escape",     @"System Request");
+    ROW(@"Option + Escape",    @"Reset — clear an error and its message line");
+    ROW(@"Shift + Return / Enter", @"Field Exit (Enter = keypad Enter or fn + Return)");
+    ROW(@"Option + E",         @"Erase to end of field");
+
     SECTION(@"Application");
     ROW(@"⌘ N",                @"New Connection — open a new Connect dialog");
     ROW(@"⌘ ,",                @"Preferences — font and display settings");

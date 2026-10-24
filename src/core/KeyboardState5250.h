@@ -66,10 +66,16 @@ public:
     };
 
     using SendRecordCallback = std::function<bool(const std::vector<uint8_t>&)>;
+    /// Sends an empty record whose GDS header carries `flags` (ATN / SRQ).
+    using SignalCallback     = std::function<bool(uint8_t headerFlags)>;
 
     KeyboardState5250(ScreenBuffer& screen, EbcdicCodec& codec);
 
     void setSendCallback(SendRecordCallback cb) { sendCb_ = std::move(cb); }
+    void setSignalCallback(SignalCallback cb)   { signalCb_ = std::move(cb); }
+
+    /// Host Read Immediate: send the modified fields now, with no AID key.
+    void sendReadImmediate();
 
     void lock(LockReason reason);
     void unlock();
@@ -90,6 +96,9 @@ public:
     bool handlePageDown();         ///< Roll Up
     bool handleHelp();
     bool handleAttn();
+    bool handleSysReq();
+    bool handleReset();            ///< Clear an error (and its message line)
+    bool handleFieldExit();
     bool handleHome();
     bool handleArrow(int dRow, int dCol);
     bool handleBackspace();
@@ -102,8 +111,16 @@ private:
     EbcdicCodec&  codec_;
 
     SendRecordCallback sendCb_;
+    SignalCallback     signalCb_;
     LockReason  lockReason_ { LockReason::Connecting };
     bool        insertMode_ { false };
+    int         ferPos_     { -1 };   ///< filled Field-Exit-Required field: cursor parked here
+
+    /// FA of the input field whose character positions include `pos`, or -1.
+    int  inputFieldAt(int pos) const;
+    /// One past the last character position of the field whose FA is at `fa`.
+    int  fieldEnd(int fa) const;
+    std::vector<uint8_t> buildInputRecord(uint8_t aidCode, bool includeModifiedFields) const;
 
     uint8_t currentFieldAttr() const;
     bool    isCurrentFieldEditable() const;

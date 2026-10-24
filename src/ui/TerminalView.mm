@@ -747,14 +747,26 @@ static BOOL isTypedCharacter(NSEvent *event) {
             if (shiftDown) pfNum += 12;
             handled = _kbd5250->handlePFKey(pfNum);
         }
+        // Field Exit: Shift+Return, or the keypad Enter key (fn+Return on laptops)
+        else if (key == NSEnterCharacter || ((key == '\r' || key == '\n') && shiftDown)) {
+            handled = _kbd5250->handleFieldExit();
+        }
         else if (key == '\r' || key == '\n') {
             handled = _kbd5250->handleEnter();
         }
         else if (key == '\t') {
             handled = _kbd5250->handleTab(altDown);  // Alt+Tab = BackTab
         }
+        // Escape keys follow IBM Access Client Solutions: Esc = Attention,
+        // Shift+Esc = SysReq; Option+Esc = Reset (clears an error message).
+        else if (key == 27 && altDown) {
+            handled = _kbd5250->handleReset();
+        }
+        else if (key == 27 && shiftDown) {
+            handled = _kbd5250->handleSysReq();
+        }
         else if (key == 27) {
-            handled = _kbd5250->handleAttn(); // Escape = Attention in 5250
+            handled = _kbd5250->handleAttn();
         }
         else if (key == NSPageUpFunctionKey) {
             handled = _kbd5250->handlePageUp();

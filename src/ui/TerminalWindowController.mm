@@ -146,9 +146,29 @@
             if (s) session5250->sendGdsRecord(payload, x3270::GDS_OP_NO_OP);
         });
 
+        // Save Screen / Read Screen replies carry the request's GDS opcode
+        _parser5250->setGdsSendCallback([weakSelf, session5250](const std::vector<uint8_t>& payload, uint8_t opcode) {
+            __strong auto s = weakSelf;
+            if (s) session5250->sendGdsRecord(payload, opcode);
+        });
+        // The parser runs on the main thread, so these can act directly.
+        _parser5250->setErrorCodeCallback([weakSelf]() {
+            __strong auto s = weakSelf;
+            if (s) s->_kbd5250->lock(x3270::KeyboardState5250::LockReason::OErr);
+        });
+        _parser5250->setReadImmediateCallback([weakSelf]() {
+            __strong auto s = weakSelf;
+            if (s) s->_kbd5250->sendReadImmediate();
+        });
+
         _kbd5250->setSendCallback([weakSelf](const std::vector<uint8_t>& record) -> bool {
             __strong auto s = weakSelf;
             return s ? s->_session->sendRecord(record) : false;
+        });
+        // Attention / SysReq: empty record with the flag in the GDS header
+        _kbd5250->setSignalCallback([weakSelf, session5250](uint8_t flags) -> bool {
+            __strong auto s = weakSelf;
+            return s ? session5250->sendGdsRecord({}, x3270::GDS_OP_NO_OP, flags) : false;
         });
 
         _session->setDataCallback([weakSelf](const std::vector<uint8_t>& record) {
