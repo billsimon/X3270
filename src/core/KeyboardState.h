@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
+#include <string>
 
 namespace x3270 {
 
@@ -81,6 +82,10 @@ public:
     bool handleCursorRight();
     bool handleReset();
 
+    /// Paste text at the cursor (see pasteText); returns the number of
+    /// characters used.
+    size_t paste(const std::u32string& text);
+
 private:
     void sendAID(uint8_t aidCode);
     void moveCursorToFirstUnprotected();
@@ -100,7 +105,8 @@ private:
     // Copy a character and its character attributes (insert/delete shifts)
     void moveCharacter(int from, int to);
     // Insert char at cursor position in current field (handles insert mode)
-    bool insertCharAtCursor(uint8_t ebcdic);
+    // autoSkip false (overlay paste): just move right one position after the character.
+    bool insertCharAtCursor(uint8_t ebcdic, bool autoSkip = true);
 
     ScreenBuffer&       screen_;
     EbcdicCodec&        codec_;

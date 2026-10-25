@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <functional>
+#include <string>
 
 namespace x3270 {
 
@@ -113,6 +114,10 @@ public:
     bool handleEraseField();       ///< Erase to end of field
     bool handleInsert();
 
+    /// Paste text at the cursor (see pasteText); returns the number of
+    /// characters used.
+    size_t paste(const std::u32string& text);
+
 private:
     ScreenBuffer& screen_;
     EbcdicCodec&  codec_;
@@ -134,7 +139,8 @@ private:
     bool    isCurrentFieldEditable() const;
     void    advanceToNextField(bool forward);
     void    moveCursorToFirstUnprotected();
-    bool    insertCharAtCursor(uint8_t ebcdic);
+    // autoSkip false (overlay paste): just move right one position after the character.
+    bool    insertCharAtCursor(uint8_t ebcdic, bool autoSkip = true);
 
     // Build and send a 5250 input record.
     // record layout: [AID][cursor_row][cursor_col][SBA+data per modified field...]

@@ -951,12 +951,6 @@ static BOOL isTypedCharacter(NSEvent *event) {
 
 // ── Clipboard (Copy / Paste) ──────────────────────────────────────────────────
 
-- (uint8_t)ebcdicForUnichar:(unichar)c {
-    // Same mapping as typed input; unmapped characters paste as EBCDIC '?'
-    int e = _codec.fromUnicode(c);
-    return e >= 0 ? (uint8_t)e : 0x6F;
-}
-
 - (void)copy:(id)sender {
     if (!_screen || _selStart == -1 || _selEnd == -1) {
         NSBeep();
@@ -1023,27 +1017,12 @@ static BOOL isTypedCharacter(NSEvent *event) {
         return;
     }
     
-    for (NSUInteger i = 0; i < text.length; i++) {
-        unichar c = [text characterAtIndex:i];
-        BOOL success = NO;
-        
-        // Newlines move focus to the next unprotected field
-        if (c == '\n' || c == '\r') {
-            if (_kbd) success = _kbd->handleTab(false);
-            else if (_kbd5250) success = _kbd5250->handleTab(false);
-        } else {
-            uint8_t ebcdic = [self ebcdicForUnichar:c];
-            if (_kbd) success = _kbd->handleEbcdicChar(ebcdic);
-            else if (_kbd5250) success = _kbd5250->handleEbcdicChar(ebcdic);
-        }
-        
-        // Stop pasting if we hit a protected field, OErr, or keyboard lock
-        if (!success) {
-            NSBeep();
-            break;
-        }
-    }
-    
+    // Laid over the screen as a block starting at the cursor column.
+    NSData *utf32 = [text.precomposedStringWithCanonicalMapping
+                        dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
+    std::u32string text32(static_cast<const char32_t *>(utf32.bytes), utf32.length / sizeof(char32_t));
+    size_t used = _kbd ? _kbd->paste(text32) : _kbd5250->paste(text32);
+    if (used < text32.size()) NSBeep();   // stopped early (lock, bottom of screen, wrap)
     [self setNeedsDisplay:YES];
 }
 
