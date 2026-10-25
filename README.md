@@ -305,7 +305,7 @@ Selection and Clipboard improvements
 
 - **Rectangular Selection:** Added support for mouse-driven rectangular (block) text selection. You can now cleanly select columns and specific areas of the green screen, matching the expected behaviour of traditional mainframe emulators.
 
-- **Copy/Paste:** Full support for copying block selections (⌘C) and pasting text (⌘V). Pasted text is laid over the screen as a block starting at the cursor column, as x3270 does: each line starts in that column (so a block pasted into the ISPF editor stays in the data area), and characters that land on protected text are dropped.
+- **Copy/Paste:** Full support for copying block selections (⌘C) and pasting text (⌘V). Pasted text is laid over the screen as a block starting at the cursor column: each line starts in that column (so a block pasted into the ISPF editor stays in the data area), and characters that land on protected text are dropped.
 
 **Security & Certificates**
 

@@ -1017,8 +1017,7 @@ static BOOL isTypedCharacter(NSEvent *event) {
         return;
     }
     
-    // Laid over the screen as a block starting at the cursor column, as
-    // x3270 pastes (KeyboardState::paste / Paste.h).
+    // Laid over the screen as a block starting at the cursor column.
     NSData *utf32 = [text.precomposedStringWithCanonicalMapping
                         dataUsingEncoding:NSUTF32LittleEndianStringEncoding];
     std::u32string text32(static_cast<const char32_t *>(utf32.bytes), utf32.length / sizeof(char32_t));

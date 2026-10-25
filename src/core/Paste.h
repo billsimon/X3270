@@ -17,20 +17,10 @@ struct PasteOps {
     std::function<void()>        cursorLeft;
 };
 
-/// Paste text as x3270 does by default (kybd.c emulate_uinput with pasting
-/// and its default overlayPaste toggle, which implies marginedPaste): the
-/// text is laid over the screen as a block whose left edge is the column the
-/// paste started in.
-///   - characters overlay the screen; protected positions drop them
-///   - a newline moves to the start column of the next row (ignored right
-///     after the text wrapped there, and as the last character)
-///   - wherever the cursor ends up left of the start column, it moves right
-///     to that column
-///   - returns are ignored, tab is Tab, form feed a space, backspace Left
-/// Pasting stops when the keyboard locks (e.g. a numeric-only field rejects
-/// a character), at a newline on the last row, or when the cursor wraps back
-/// above where it started.
-///
+/// Lay text over the screen as a block whose left edge is the cursor column.
+/// Each line starts in that column on the next row; characters that land on
+/// protected positions are dropped.  Stops when the keyboard locks, at a
+/// newline on the last row, or if the cursor wraps back to the top.
 /// Returns the number of characters of `text` that were used.
 inline size_t pasteText(ScreenBuffer& screen, const EbcdicCodec& codec,
                         const std::u32string& text, const PasteOps& k) {

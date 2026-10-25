@@ -82,8 +82,8 @@ public:
     bool handleCursorRight();
     bool handleReset();
 
-    /// Paste text the way x3270 does (see pasteText in Paste.h); returns the
-    /// number of characters used, fewer than text.size() if pasting stopped.
+    /// Paste text at the cursor (see pasteText); returns the number of
+    /// characters used.
     size_t paste(const std::u32string& text);
 
 private:
